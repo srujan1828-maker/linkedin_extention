@@ -1,0 +1,60 @@
+{
+  "name": "LinkedIn Learning AI AutoPilot",
+  "description": "Multi-provider AI quiz auto-solver, autonomous course completer with focus modes, and 16x video speed engine for LinkedIn Learning.",
+  "version": "10.3.0",
+  "manifest_version": 3,
+  "icons": {
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "js": ["page-inject.js"],
+      "matches": [
+        "https://www.linkedin.com/learning/*",
+        "https://www.linkedin.com/learning-career-hub/*",
+        "https://www.linkedin.com/career-hub/*",
+        "https://www.linkedin.com/*"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "js": ["content.js"],
+      "matches": [
+        "https://www.linkedin.com/learning/*",
+        "https://www.linkedin.com/learning-career-hub/*",
+        "https://www.linkedin.com/career-hub/*",
+        "https://www.linkedin.com/*"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://*.linkedin.com/*",
+    "https://www.linkedin.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.groq.com/*",
+    "https://openrouter.ai/*",
+    "https://integrate.api.nvidia.com/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["page-inject.js"],
+      "matches": ["https://www.linkedin.com/*"]
+    }
+  ]
+}

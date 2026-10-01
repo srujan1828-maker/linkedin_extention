@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LinkedIn Learning AI AutoPilot</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      width: 375px;
+      padding: 14px;
+      background: #0f172a;
+      color: #f8fafc;
+      overflow-x: hidden;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 2px solid rgba(255, 255, 255, 0.08);
+      padding-bottom: 10px;
+      margin-bottom: 12px;
+    }
+    .header-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .header-logo {
+      width: 24px;
+      height: 24px;
+      background: linear-gradient(135deg, #0a66c2 0%, #004182 100%);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 10px rgba(10, 102, 194, 0.5);
+    }
+    .header-logo svg {
+      width: 14px;
+      height: 14px;
+      fill: #ffffff;
+    }
+    h3 {
+      color: #38bdf8;
+      font-size: 15px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .version {
+      font-size: 10px;
+      color: #94a3b8;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-weight: 600;
+    }
+
+    /* Navigation Tabs */
+    .nav-tabs {
+      display: flex;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      padding: 3px;
+      border-radius: 8px;
+      gap: 3px;
+      margin-bottom: 12px;
+    }
+    .tab-btn {
+      flex: 1;
+      padding: 6px 4px;
+      border: none;
+      background: transparent;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #94a3b8;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      transition: all 0.18s ease;
+    }
+    .tab-btn:hover {
+      color: #f8fafc;
+    }
+    .tab-btn.active {
+      background: #0a66c2;
+      color: #ffffff;
+      box-shadow: 0 2px 8px rgba(10, 102, 194, 0.4);
+    }
+    .dot-badge {
+      width: 6px;
+      height: 6px;
+      background: #10b981;
+      border-radius: 50%;
+      display: none;
+    }
+    .dot-badge.active {
+      display: inline-block;
+    }
+
+    /* Tab Content Panes */
+    .tab-pane {
+      display: none;
+    }
+    .tab-pane.active {
+      display: block;
+    }
+
+    /* Controls Group */
+    .control-group {
+      margin-bottom: 9px;
+      background: rgba(30, 41, 59, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 9px 12px;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    }
+    .control-group:focus-within {
+      border-color: #38bdf8;
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+    }
+    label {
+      font-size: 12.5px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .label-title {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .label-hint {
+      font-size: 10px;
+      color: #94a3b8;
+      font-weight: 400;
+    }
+    input[type="number"] {
+      width: 62px;
+      padding: 5px 6px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: rgba(15, 23, 42, 0.8);
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 13px;
+      text-align: center;
+      color: #38bdf8;
+      outline: none;
+    }
+    .provider-select {
+      width: 180px;
+      padding: 5px 6px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      font-size: 11px;
+      font-weight: 600;
+      color: #f8fafc;
+      background: #1e293b;
+      outline: none;
+      cursor: pointer;
+    }
+
+    /* Speed preset buttons */
+    .speed-presets-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      margin-top: 8px;
+    }
+    .speed-preset-btn {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #cbd5e1;
+      border-radius: 5px;
+      padding: 4px 8px;
+      font-size: 10.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .speed-preset-btn:hover {
+      background: rgba(10, 102, 194, 0.3);
+      color: #fff;
+      border-color: #0a66c2;
+    }
+    .speed-preset-btn.active {
+      background: #0a66c2;
+      border-color: #38bdf8;
+      color: #fff;
+    }
+
+    /* Action Buttons */
+    .btn-action {
+      width: 100%;
+      padding: 10px 14px;
+      border: none;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      transition: all 0.2s ease;
+      margin-bottom: 9px;
+    }
+    .btn-magic {
+      background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(16, 185, 129, 0.3);
+    }
+    .btn-magic:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(16, 185, 129, 0.45);
+    }
+    .btn-quiz {
+      background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%);
+      color: #ffffff;
+      box-shadow: 0 4px 14px rgba(139, 92, 246, 0.3);
+    }
+    .btn-quiz:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(139, 92, 246, 0.45);
+    }
+    .btn-stop {
+      background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+      color: #ffffff;
+      padding: 7px 12px;
+      font-size: 11px;
+      margin-top: 6px;
+    }
+
+    /* Progress Box */
+    .progress-container {
+      display: none;
+      background: rgba(30, 41, 59, 0.9);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      border-radius: 8px;
+      padding: 10px 12px;
+      margin-bottom: 9px;
+    }
+    .progress-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .progress-title {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #34d399;
+    }
+    .progress-pct {
+      font-size: 12.5px;
+      font-weight: 800;
+      color: #38bdf8;
+    }
+    .progress-msg {
+      font-size: 11px;
+      color: #e2e8f0;
+      margin-bottom: 7px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .progress-bar-bg {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+    .progress-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #10b981, #38bdf8);
+      border-radius: 3px;
+      transition: width 0.3s ease;
+    }
+
+    /* Provider Status & Chips */
+    .provider-status-card {
+      background: rgba(30, 41, 59, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 8px 10px;
+      margin-bottom: 9px;
+    }
+    .status-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+    .status-card-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #94a3b8;
+    }
+    .cooldown-reset-btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #cbd5e1;
+      font-size: 9.5px;
+      font-weight: 600;
+      padding: 2px 7px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .cooldown-reset-btn:hover {
+      background: rgba(255, 255, 255, 0.15);
+      color: #fff;
+    }
+    .status-chips-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 5px;
+    }
+    .status-chip {
+      font-size: 10px;
+      padding: 3px 6px;
+      border-radius: 4px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 600;
+    }
+    .status-chip.ready {
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+    }
+    .status-chip.unset {
+      background: rgba(255, 255, 255, 0.05);
+      color: #64748b;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    /* Keys Section */
+    .keys-card {
+      background: rgba(30, 41, 59, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      margin-bottom: 9px;
+      overflow: hidden;
+    }
+    .keys-card-header {
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+      font-size: 11.5px;
+      font-weight: 700;
+      color: #38bdf8;
+    }
+    .keys-drawer {
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      padding: 10px 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      background: rgba(15, 23, 42, 0.5);
+    }
+    .key-field { display: flex; flex-direction: column; gap: 4px; }
+    .key-label-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 10.5px;
+    }
+    .key-name { font-weight: 600; color: #e2e8f0; }
+    .free-pill {
+      font-size: 9px;
+      background: rgba(16, 185, 129, 0.2);
+      color: #34d399;
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-weight: 700;
+      margin-left: 4px;
+    }
+    .get-key-link {
+      color: #38bdf8;
+      text-decoration: none;
+      font-size: 10px;
+    }
+    .key-input {
+      width: 100%;
+      padding: 6px 9px;
+      border-radius: 5px;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #f8fafc;
+      font-size: 11px;
+      font-family: monospace;
+      outline: none;
+    }
+    .key-input:focus { border-color: #38bdf8; }
+
+    /* Checkboxes */
+    .checkbox-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .checkbox-label input[type="checkbox"] {
+      width: 15px;
+      height: 15px;
+      accent-color: #0a66c2;
+      cursor: pointer;
+    }
+
+    /* TAB 2: AI Solution Viewer */
+    .quiz-empty {
+      text-align: center;
+      padding: 28px 14px;
+      color: #94a3b8;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .quiz-empty-icon {
+      font-size: 28px;
+      margin-bottom: 8px;
+    }
+    .solution-card {
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 8px;
+    }
+    .solution-counter {
+      font-size: 10.5px;
+      font-weight: 700;
+      color: #a78bfa;
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .solution-prompt {
+      font-size: 12px;
+      font-weight: 600;
+      color: #f1f5f9;
+      margin-bottom: 6px;
+      line-height: 1.35;
+    }
+    .solution-choice {
+      padding: 5px 8px;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      border-radius: 5px;
+      color: #34d399;
+      font-size: 11px;
+      font-weight: 600;
+      margin-top: 4px;
+    }
+    .solution-rationale {
+      font-size: 10.5px;
+      color: #cbd5e1;
+      margin-top: 5px;
+      line-height: 1.35;
+      font-style: italic;
+    }
+
+    /* TAB 3: Logs */
+    .log-section {
+      background: #090d1a;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 8px 10px;
+    }
+    .log-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      padding-bottom: 6px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .log-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #34d399;
+    }
+    .log-clear-btn {
+      background: rgba(255, 255, 255, 0.1);
+      border: none;
+      color: #94a3b8;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .log-clear-btn:hover {
+      background: rgba(255, 255, 255, 0.2);
+      color: #fff;
+    }
+    .log-list {
+      max-height: 240px;
+      overflow-y: auto;
+      font-family: ui-monospace, Menlo, Monaco, Consolas, monospace;
+      font-size: 10.5px;
+      line-height: 1.4;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .log-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 5px;
+      word-break: break-word;
+    }
+    .log-time {
+      color: #64748b;
+      font-size: 9px;
+      flex-shrink: 0;
+      padding-top: 1px;
+    }
+    .log-msg { flex: 1; }
+    .log-msg.info { color: #cbd5e1; }
+    .log-msg.success { color: #34d399; font-weight: 600; }
+    .log-msg.warn { color: #f59e0b; }
+    .log-msg.error { color: #ef4444; font-weight: 600; }
+
+    /* Footer */
+    .footer {
+      margin-top: 12px;
+      text-align: center;
+      font-size: 11px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 8px;
+      color: #64748b;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-title">
+      <div class="header-logo">
+        <svg viewBox="0 0 24 24"><path d="M20.447 20.452H17.02v-5.569c0-1.327-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.604V9h3.283v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a1.902 1.902 0 1 1 0-3.804 1.902 1.902 0 0 1 0 3.804zM6.954 20.452H3.72V9h3.234v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+      </div>
+      <h3>⚡ LinkedIn AutoPilot</h3>
+    </div>
+    <span class="version">v10.2</span>
+  </div>
+
+  <!-- Navigation Tabs -->
+  <div class="nav-tabs">
+    <button class="tab-btn active" data-tab="settings">⚡ Controls</button>
+    <button class="tab-btn" data-tab="quiz">🧠 AI Solution <span id="quizBadge" class="dot-badge"></span></button>
+    <button class="tab-btn" data-tab="logs">📋 Logs</button>
+  </div>
+
+  <!-- TAB 1: Controls -->
+  <div id="pane-settings" class="tab-pane active">
+
+    <!-- 🚀 Run AutoPilot / Complete Entire Course -->
+    <button id="btn-bulk-complete" class="btn-action btn-magic">
+      <span>🚀 Run Course AutoPilot</span>
+    </button>
+
+    <!-- 🧠 Solve Current Quiz Button -->
+    <button id="btn-solve-quiz" class="btn-action btn-quiz">
+      <span>🧠 Solve Current Quiz (AI)</span>
+    </button>
+
+    <!-- Animated Progress Bar -->
+    <div id="bulk-progress-container" class="progress-container">
+      <div class="progress-header">
+        <span class="progress-title">COURSE PROGRESS</span>
+        <span class="progress-pct" id="bulk-progress-pct">0%</span>
+      </div>
+      <div class="progress-msg" id="bulk-progress-msg">Initializing runner...</div>
+      <div class="progress-bar-bg">
+        <div class="progress-bar-fill" id="bulk-progress-bar"></div>
+      </div>
+      <button id="btn-stop-bulk" class="btn-action btn-stop">⏹ Stop AutoPilot</button>
+    </div>
+
+    <!-- Course Focus Mode Selector (from Coursera AutoPilot) -->
+    <div class="control-group">
+      <label>
+        <div class="label-title">
+          <span>Course Focus Mode</span>
+          <span class="label-hint">Item filtering</span>
+        </div>
+        <select id="focusModeSelect" class="provider-select">
+          <option value="pending_only" selected>🎯 All Uncompleted Tasks (Videos &amp; Quizzes with No Green Tick)</option>
+          <option value="videos_only">🎬 Only Videos (Skip Quizzes)</option>
+          <option value="quizzes_only">🧠 Only Practice &amp; Quizzes (Skip Videos)</option>
+          <option value="all">🔄 Complete Everything (All Course Items)</option>
+        </select>
+      </label>
+    </div>
+
+    <!-- Playback Speed Injection -->
+    <div class="control-group">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+        <label class="checkbox-label" style="margin: 0; cursor: pointer;">
+          <input type="checkbox" id="speedInjectionCB" checked>
+          <span style="font-weight: 700;">⚡ Video Speed Injection</span>
+        </label>
+        <span id="speedToggleStatus" style="font-size: 10px; font-weight: 700; color: #34d399; background: rgba(16,185,129,0.15); border: 1px solid rgba(16,185,129,0.3); border-radius: 4px; padding: 1px 6px;">ENABLED</span>
+      </div>
+      <label id="speedInputWrapper">
+        <div class="label-title">
+          <span>Target Playback Speed</span>
+          <span class="label-hint">Range: 0.25x - 16x</span>
+        </div>
+        <input type="number" id="speedInput" step="0.25" min="0.25" max="16" value="16.0">
+      </label>
+
+      <!-- Speed Presets -->
+      <div class="speed-presets-grid">
+        <button type="button" class="speed-preset-btn" data-speed="1.0">1.0x</button>
+        <button type="button" class="speed-preset-btn" data-speed="1.5">1.5x</button>
+        <button type="button" class="speed-preset-btn" data-speed="2.0">⚡ 2.0x (Safe)</button>
+        <button type="button" class="speed-preset-btn" data-speed="3.0">🚀 3.0x (Turbo)</button>
+        <button type="button" class="speed-preset-btn" data-speed="4.0">4.0x</button>
+        <button type="button" class="speed-preset-btn" data-speed="8.0">8.0x</button>
+        <button type="button" class="speed-preset-btn active" data-speed="16.0">16x (Max)</button>
+      </div>
+    </div>
+
+    <!-- AI Provider Selector -->
+    <div class="control-group">
+      <label>
+        <div class="label-title">
+          <span>AI Engine</span>
+          <span class="label-hint">Auto-failover on rate limits</span>
+        </div>
+        <select id="providerSelect" class="provider-select">
+          <option value="auto">🔄 Auto-Failover (Recommended)</option>
+          <option value="gemini">🌟 Google Gemini (Recommended)</option>
+          <option value="groq">⚡ Groq Cloud (Ultra Fast)</option>
+          <option value="openrouter">🌐 OpenRouter (Free Models)</option>
+          <option value="nvidia">🟢 NVIDIA NIM (Llama 3.3 70B)</option>
+        </select>
+      </label>
+    </div>
+
+    <!-- AI Status & Cooldowns -->
+    <div class="provider-status-card">
+      <div class="status-card-header">
+        <span class="status-card-title">📡 AI Status &amp; Cooldowns</span>
+        <button id="resetCooldownsBtn" type="button" class="cooldown-reset-btn" title="Reset all provider cooldowns">Reset</button>
+      </div>
+      <div class="status-chips-grid">
+        <div class="status-chip unset" id="chip-groq">
+          <span>Groq</span>
+          <span class="chip-state">Checking...</span>
+        </div>
+        <div class="status-chip unset" id="chip-gemini">
+          <span>Gemini</span>
+          <span class="chip-state">Checking...</span>
+        </div>
+        <div class="status-chip unset" id="chip-openrouter">
+          <span>OpenRouter</span>
+          <span class="chip-state">Checking...</span>
+        </div>
+        <div class="status-chip unset" id="chip-nvidia">
+          <span>NVIDIA</span>
+          <span class="chip-state">Checking...</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Free AI API Keys Drawer -->
+    <div class="keys-card">
+      <div class="keys-card-header" id="toggleKeysBtn">
+        <span>🔑 Configure Free AI API Keys</span>
+        <span id="keysArrow">▼</span>
+      </div>
+      <div id="keysDrawer" class="keys-drawer">
+        <div class="key-field">
+          <div class="key-label-row">
+            <span class="key-name">⚡ Groq Cloud <span class="free-pill">Free &amp; Fast</span></span>
+            <a href="https://console.groq.com/keys" target="_blank" rel="noopener noreferrer" class="get-key-link">Get Free Key ↗</a>
+          </div>
+          <input type="password" id="groqApiKeyInput" placeholder="gsk_..." class="key-input">
+        </div>
+
+        <div class="key-field">
+          <div class="key-label-row">
+            <span class="key-name">🌟 Google Gemini <span class="free-pill">Free Tier</span></span>
+            <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" class="get-key-link">Get Free Key ↗</a>
+          </div>
+          <input type="password" id="geminiApiKeyInput" placeholder="AI Studio Key" class="key-input">
+        </div>
+
+        <div class="key-field">
+          <div class="key-label-row">
+            <span class="key-name">🌐 OpenRouter <span class="free-pill">Free Models</span></span>
+            <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" class="get-key-link">Get Free Key ↗</a>
+          </div>
+          <input type="password" id="openRouterApiKeyInput" placeholder="sk-or-..." class="key-input">
+        </div>
+
+        <div class="key-field">
+          <div class="key-label-row">
+            <span class="key-name">🟢 NVIDIA NIM <span class="free-pill">1K Credits</span></span>
+            <a href="https://build.nvidia.com/" target="_blank" rel="noopener noreferrer" class="get-key-link">Get Free Key ↗</a>
+          </div>
+          <input type="password" id="nvidiaApiKeyInput" placeholder="nvapi-..." class="key-input">
+        </div>
+      </div>
+    </div>
+
+    <!-- Automation Checkboxes -->
+    <div class="control-group">
+      <label class="checkbox-label" title="Verifies green checkmark in syllabus before advancing. Retries up to 5 times.">
+        <input type="checkbox" id="strictCompletionCB" checked> 
+        <span>Strict Green Tick Verification &amp; Auto-Retry</span>
+      </label>
+    </div>
+
+    <div class="control-group">
+      <label class="checkbox-label">
+        <input type="checkbox" id="autoSolveCB" checked> 
+        <span>Auto-Solve Chapter Quizzes with AI</span>
+      </label>
+    </div>
+
+    <div class="control-group">
+      <label class="checkbox-label">
+        <input type="checkbox" id="bgPlayCB" checked> 
+        <span>Enable Background Tab Playback</span>
+      </label>
+    </div>
+
+    <div class="control-group">
+      <label class="checkbox-label">
+        <input type="checkbox" id="autoNavigateCB" checked> 
+        <span>Auto-Navigate Next Lesson</span>
+      </label>
+    </div>
+  </div>
+
+  <!-- TAB 2: AI Solution Viewer -->
+  <div id="pane-quiz" class="tab-pane">
+    <div id="quizSolutionContainer">
+      <div class="quiz-empty">
+        <div class="quiz-empty-icon">🧠</div>
+        No quiz solved yet.<br>
+        Navigate to any quiz on LinkedIn Learning to view live AI answers, step-by-step reasoning, and marked choices right here!
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB 3: Activity & Error Log -->
+  <div id="pane-logs" class="tab-pane">
+    <div class="log-section">
+      <div class="log-header">
+        <span class="log-title">📋 Activity &amp; Error Log</span>
+        <button id="clearLogsBtn" type="button" class="log-clear-btn" title="Clear log history">Clear</button>
+      </div>
+      <div id="logList" class="log-list">
+        <div class="log-empty" style="color: #64748b; text-align: center; padding: 12px 0;">No activity recorded yet.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    <span>LinkedIn Learning AutoPilot &bull; Multi-Provider AI Architecture</span>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
