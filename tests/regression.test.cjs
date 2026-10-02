@@ -15,13 +15,17 @@ function speedEngine() {
     play() { throw Error('Speed changes must not start playback'); }
   }
   const video = new Media();
-  const listeners = {};
-  const document = Object.create({ get hidden() { return true; }, get visibilityState() { return 'hidden'; } });
-  Object.assign(document, { querySelector: () => video, querySelectorAll: () => [video], addEventListener: noop });
-  const window = { addEventListener: (type, fn) => (listeners[type] ||= []).push(fn) };
-  vm.runInNewContext(source('page-inject.js'), { window, document, HTMLMediaElement: Media, console, setInterval: noop, setTimeout: noop });
+  const listeners = {}, documentListeners = {}, timers = [], posts = [];
+  let nativeHidden = true, nativeFocus = true;
+  const document = Object.create({ get hidden() { return nativeHidden; }, get visibilityState() { return nativeHidden ? 'hidden' : 'visible'; } });
+  Object.assign(document, { querySelector: () => video, querySelectorAll: () => [video], hasFocus: () => nativeFocus, addEventListener: (type, fn) => (documentListeners[type] ||= []).push(fn) });
+  const window = { postMessage: m => posts.push(m), addEventListener: (type, fn) => (listeners[type] ||= []).push(fn) };
+  vm.runInNewContext(source('page-inject.js'), { window, document, HTMLMediaElement: Media, console, setInterval: noop, setTimeout: fn => timers.push(fn) });
   const message = data => listeners.message.forEach(fn => fn({ source: window, data }));
-  return { video, document, window, message, listeners };
+  return { video, document, window, message, listeners, documentListeners, timers, posts,
+    setHidden: value => { nativeHidden = value; }, setFocus: value => { nativeFocus = value; },
+    emitWindow: type => (listeners[type] || []).forEach(fn => fn({type, target:window, stopImmediatePropagation:noop})),
+    emitDocument: (type, event = {}) => (documentListeners[type] || []).forEach(fn => fn({type, target:video, ...event})) }; 
 }
 
 test('engine starts inactive and preserves sound and pause preferences at high rates', () => {
@@ -353,4 +357,87 @@ test('return respects disabled navigation and cancels old lesson fallbacks', asy
   assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), true);
   assert.equal(cancelled, 42);
   assert.equal(vm.runInContext('navWatchdogTimer', c.ctx), null);
+});
+
+
+test('background toggle restores native focus when disabled and never starts paused media', () => {
+  const e = speedEngine();
+  e.setFocus(false);
+  assert.equal(e.document.hasFocus(), false);
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+  assert.equal(e.document.hasFocus(), true);
+  assert.equal(e.video.paused, true);
+  assert.equal(e.timers.length, 0);
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: false });
+  assert.equal(e.document.hasFocus(), false);
+});
+
+test('tab-switch pause resumes previously playing media outside bulk mode', async () => {
+  const e = speedEngine();
+  e.setHidden(false);
+  e.video.paused = false;
+  let plays = 0;
+  e.video.play = async () => { plays++; e.video.paused = false; };
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+  e.setHidden(true);
+  e.emitWindow('visibilitychange');
+  e.video.paused = true;
+  e.emitDocument('pause');
+  assert.equal(e.timers.length, 1);
+  await e.timers.shift()();
+  assert.equal(plays, 1);
+  assert.equal(e.video.paused, false);
+});
+
+test('trusted pause input or disabling background play cancels scheduled recovery', async () => {
+  for (const cancel of ['input', 'disable']) {
+    const e = speedEngine();
+    e.setHidden(false);
+    e.video.paused = false;
+    let plays = 0;
+    e.video.play = async () => { plays++; };
+    e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+    e.emitWindow('blur');
+    e.video.paused = true;
+    e.emitDocument('pause');
+    if (cancel === 'input') e.emitDocument('keydown', {isTrusted:true});
+    else e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: false });
+    await e.timers.shift()();
+    assert.equal(plays, 0);
+  }
+});
+
+test('foreground pauses remain paused and recovery is bounded for repeated background pauses', async () => {
+  const e = speedEngine();
+  e.setHidden(false);
+  e.video.paused = false;
+  let plays = 0;
+  e.video.play = async () => { plays++; e.video.paused = false; };
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+  e.video.paused = true;
+  e.emitDocument('pause');
+  assert.equal(e.timers.length, 0);
+  e.video.paused = false;
+  e.emitWindow('blur');
+  for (let i = 0; i < 3; i++) {
+    e.video.paused = true;
+    e.emitDocument('pause');
+    if (e.timers.length) await e.timers.shift()();
+  }
+  assert.equal(plays, 2);
+});
+
+test('blocked background recovery reports the need to press Play without retry loops', async () => {
+  const e = speedEngine();
+  e.setHidden(false);
+  e.video.paused = false;
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+  e.emitWindow('blur');
+  e.video.paused = true;
+  e.video.play = async () => { throw Error('NotAllowedError'); };
+  e.emitDocument('pause');
+  await e.timers.shift()();
+  assert.equal(e.posts.at(-1).type, 'LI_BACKGROUND_PLAY_BLOCKED');
+  e.emitDocument('pause');
+  assert.equal(e.timers.length, 0);
 });

@@ -2442,6 +2442,13 @@ function navigateToLesson(lesson) {
 
 // ─── Playback Engine & Anti-Freeze ────────────────────────────────────────────
 
+window.addEventListener('message', event => {
+  if (event.source !== window || event.data?.type !== 'LI_BACKGROUND_PLAY_BLOCKED' || !backgroundRun) return;
+  const message = 'Background playback was blocked by the browser. Open the tab and press Play once.';
+  showHUD(message, 'warn');
+  sendProgress({ message });
+});
+
 function syncPlaybackSettings() {
   window.postMessage({ type: 'LI_FORCE_SPEED', speed: currentSpeed, enabled: speedInjectionEnabled }, window.location.origin);
   window.postMessage({ type: 'LI_SET_BACKGROUND_PLAY', enabled: backgroundRun }, window.location.origin);
