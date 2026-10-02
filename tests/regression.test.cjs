@@ -282,3 +282,75 @@ test('path completion requires explicit status, not a green progress bar or 100%
   c.ctx.card.innerText = 'Course\nCompleted Projects\n100%';
   assert.equal(vm.runInContext('isPathItemCompleted(card)', c.ctx), false);
 });
+
+test('ordinary autoplay returns to the saved path without bulk mode', async () => {
+  const url = 'https://www.linkedin.com/learning/paths/original?u=123';
+  const c = await content({ lastLearningPathUrl: url, bulkActive: false });
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), false);
+  assert.equal(await vm.runInContext('returnToLearningPath({allowAutoplay:true})', c.ctx), true);
+  assert.equal(c.window.location.href, url);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), false);
+});
+
+test('a hidden explicit back link supplies the path destination', async () => {
+  const c = await content({});
+  const href = '/learning/paths/hidden-path?u=123';
+  const back = { innerText: 'BACK TO LEARNING PATH', getAttribute: name => name === 'href' ? href : '', closest: () => null };
+  c.document.querySelectorAll = selector => selector === 'a[href]' ? [back] : [];
+  vm.runInContext('isElementClickable = () => false; isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), true);
+  assert.equal(c.window.location.href, 'https://www.linkedin.com' + href);
+});
+
+test('return prefers the active queue and skips invalid saved destinations', async () => {
+  const queued = 'https://www.linkedin.com/learning/paths/queued?u=123';
+  const c = await content({ lastLearningPathUrl: 'https://example.com/learning/paths/wrong', pathQueueActive: true,
+    pathQueueIndex: 1, pathQueue: [{url:'https://www.linkedin.com/learning/paths/old'}, {url:queued}] });
+  vm.runInContext('isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), true);
+  assert.equal(c.window.location.href, queued);
+  const d = await content({ lastLearningPathUrl: 'https://example.com/learning/paths/wrong' });
+  d.document.referrer = 'https://www.linkedin.com/learning/paths/referrer?u=123';
+  vm.runInContext('isBulkActive = true', d.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', d.ctx), true);
+  assert.equal(d.window.location.href, d.document.referrer);
+});
+
+test('Stop cancels return while storage is being read', async () => {
+  const c = await content({});
+  vm.runInContext('isBulkActive = true', c.ctx);
+  let resolveRead;
+  c.chrome.storage.local.get = () => new Promise(resolve => { resolveRead = resolve; });
+  const original = c.window.location.href;
+  const pending = vm.runInContext('returnToLearningPath()', c.ctx);
+  vm.runInContext('quizRunEpoch++; isBulkActive = false', c.ctx);
+  resolveRead({ lastLearningPathUrl: 'https://www.linkedin.com/learning/paths/original' });
+  assert.equal(await pending, false);
+  assert.equal(c.window.location.href, original);
+});
+
+test('final exam presence does not block the return to the path', async () => {
+  const url = 'https://www.linkedin.com/learning/paths/original';
+  const c = await content({ lastLearningPathUrl: url });
+  const exam = { closest: () => null };
+  c.document.querySelector = selector => selector.includes('/learning/exams/summative/') ? exam : null;
+  vm.runInContext('isLessonCompleted = () => false; isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('finishCourseAndReturnToPath()', c.ctx), true);
+  assert.equal(c.window.location.href, url);
+  assert.equal(c.saved.bulkActive, undefined, 'bulk is not stopped on the course page');
+  assert.equal(c.saved.pathExamNotice.courseSlug, 'example');
+  assert.equal(c.saved.pathExamNotice.pathUrl, url);
+});
+
+test('return respects disabled navigation and cancels old lesson fallbacks', async () => {
+  const url = 'https://www.linkedin.com/learning/paths/original';
+  const c = await content({ lastLearningPathUrl: url, autoNavigate: false });
+  vm.runInContext('isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), false);
+  let cancelled;
+  c.ctx.clearTimeout = id => { cancelled = id; };
+  vm.runInContext('autoNavigateEnabled = true; navWatchdogTimer = 42', c.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), true);
+  assert.equal(cancelled, 42);
+  assert.equal(vm.runInContext('navWatchdogTimer', c.ctx), null);
+});

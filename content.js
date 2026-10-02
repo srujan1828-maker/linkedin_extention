@@ -116,10 +116,20 @@ function preserveLearningContext(rawHref) {
   return target.href;
 }
 
+function validLearningPathUrl(raw) {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw, window.location.href);
+    return url.origin === window.location.origin &&
+      /^\/learning\/(?:paths|learning-paths)\/[^/]+\/?$/.test(url.pathname) ? url.href : null;
+  } catch (e) { return null; }
+}
+
 function rememberLearningPath() {
+  const current = validLearningPathUrl(window.location.href);
   const back = findBackToLearningPathButton();
-  const url = /\/(?:paths|learning-paths)\//.test(window.location.pathname)
-    ? window.location.href : back?.href;
+  const url = current || validLearningPathUrl(back?.getAttribute('href') || back?.href) ||
+    validLearningPathUrl(lastLearningPathUrl) || validLearningPathUrl(document.referrer);
   if (!url || url === lastLearningPathUrl) return;
   learningPathActive = true;
   lastLearningPathUrl = url;
@@ -470,50 +480,15 @@ function getLearningPathItems() {
 }
 
 function findBackToLearningPathButton() {
-  // Check for explicit back-to-path links
-  const allClickable = Array.from(document.querySelectorAll('a, button, [role="button"]'));
-  for (const el of allClickable) {
-    if (isLanguageElement(el)) continue;
-    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-    const href = (el.getAttribute('href') || el.href || '').toLowerCase();
-    const combined = text + ' ' + aria;
-
-    if (
-      /back to learning path|back to path|kembali ke jalur pembelajaran|kembali ke path/i.test(combined) ||
-      (href.includes('/learning/paths/') && (/back|kembali|←|↩/i.test(combined) || !text))
-    ) {
-      if (isElementClickable(el)) return el;
-    }
-  }
-
-  // Check sidebar top area for path return link
-  const sidebar = document.querySelector('#course-contents, [class*="classroom-toc"], aside, nav');
-  if (sidebar) {
-    const topLinks = sidebar.querySelectorAll('a[href*="/learning/paths/"], a');
-    for (const link of topLinks) {
-      const href = (link.getAttribute('href') || link.href || '').toLowerCase();
-      const text = (link.innerText || '').trim().toLowerCase();
-      if (href.includes('/learning/paths/') || (/back to|kembali ke|←|↩/i.test(text) && /path|jalur/i.test(text))) {
-        if (isElementClickable(link)) return link;
-      }
-    }
-  }
-
-  // Check for ANY link to /learning/paths/ anywhere in header/nav/main
-  const anyPathLink = document.querySelector('a[href*="/learning/paths/"], a[href*="/paths/"], a[href*="/learning-career-hub/paths/"]');
-  if (anyPathLink && isElementClickable(anyPathLink)) {
-    return anyPathLink;
-  }
-
-  return null;
+  // A hidden sidebar anchor still supplies a valid destination; no click is needed.
+  const links = Array.from(document.querySelectorAll('a[href]')).filter(link =>
+    validLearningPathUrl(link.getAttribute('href') || link.href));
+  const explicit = links.find(link => /back to (?:learning )?path|kembali ke (?:jalur|path)/i.test(
+    (link.innerText || link.textContent || '') + ' ' + (link.getAttribute('aria-label') || '')));
+  if (explicit) return explicit;
+  return links.find(link => link.closest('.classroom-layout-sidebar-body, .classroom-layout__sidebar-body, .classroom-body__sidebar-body, .classroom-toc-banner, #course-contents')) || null;
 }
 
-/**
- * Handles one step of Learning Path auto-navigation.
- * Called when we detect we're on a Learning Path overview page.
- * Finds the first uncompleted course and clicks into it.
- */
 async function handleLearningPathStep() {
   if (!isBulkActive || !autoNavigateEnabled) return;
   pauseLearningPathVideos();
@@ -543,6 +518,24 @@ async function handleLearningPathStep() {
     showHUD('🔍 Scanning Learning Path courses...', 'info');
     setTimeout(runAutonomousStep, 2000);
     return;
+  }
+
+  const { pathExamNotice } = await chrome.storage.local.get(['pathExamNotice']);
+  if (!isBulkActive || !autoNavigateEnabled) return;
+  if (pathExamNotice && validLearningPathUrl(pathExamNotice.pathUrl) &&
+      new URL(pathExamNotice.pathUrl).pathname === window.location.pathname) {
+    const course = items.find(item => new URL(item.fullHref).pathname.split('/')[2] === pathExamNotice.courseSlug);
+    await chrome.storage.local.set({ pathExamNotice: null });
+    if (!isBulkActive || !autoNavigateEnabled) return;
+    if (course && !course.completed) {
+      isBulkActive = false;
+      await chrome.storage.local.set({ bulkActive: false });
+      const message = `Returned to the path. ${course.title} still needs completion; check its final exam manually, then restart.`;
+      showHUD(message, 'warn');
+      sendProgress({ error: true, message });
+      await addLog(message, 'warn');
+      return;
+    }
   }
 
   // Save path state
@@ -641,22 +634,52 @@ async function handleLearningPathStep() {
  * When a course finishes and learningPathActive is true,
  * return to the Learning Path overview page.
  */
-async function returnToLearningPath() {
-  if (!isBulkActive || !autoNavigateEnabled) return false;
-  const stored = await chrome.storage.local.get(['lastLearningPathUrl']);
-  if (!isBulkActive || !autoNavigateEnabled) return false;
+async function returnToLearningPath({ allowAutoplay = false, pendingExam = false } = {}) {
+  const epoch = quizRunEpoch;
+  const canReturn = () => epoch === quizRunEpoch && autoNavigateEnabled &&
+    (isBulkActive || (allowAutoplay && autoplayEnabled));
+  if (!canReturn()) return false;
+  const stored = await chrome.storage.local.get(['lastLearningPathUrl', 'pathQueueActive', 'pathQueue', 'pathQueueIndex']);
+  if (!canReturn()) return false;
   const back = findBackToLearningPathButton();
-  const raw = back?.href || lastLearningPathUrl || stored.lastLearningPathUrl;
-  if (!raw) return false;
-  let target;
-  try { target = new URL(raw, window.location.href); } catch (e) { return false; }
-  if (target.origin !== window.location.origin || !/^\/learning\/(paths|learning-paths)\//.test(target.pathname)) return false;
+  const queued = stored.pathQueueActive ? stored.pathQueue?.[stored.pathQueueIndex || 0]?.url : null;
+  const target = [queued, back?.getAttribute('href') || back?.href, lastLearningPathUrl,
+    stored.lastLearningPathUrl, document.referrer].map(validLearningPathUrl).find(Boolean);
+  if (!target) {
+    log('Cannot return: no valid learning path URL is available.');
+    return false;
+  }
+  if (new URL(target).pathname === window.location.pathname) return true;
   learningPathActive = true;
-  lastLearningPathUrl = target.href;
-  await chrome.storage.local.set({ learningPathActive: true, lastLearningPathUrl });
-  if (!isBulkActive || !autoNavigateEnabled) return false;
-  window.location.href = target.href;
+  lastLearningPathUrl = target;
+  const state = { learningPathActive: true, lastLearningPathUrl: target };
+  if (pendingExam) state.pathExamNotice = { pathUrl: target, courseSlug: getCourseSlug() };
+  await chrome.storage.local.set(state);
+  if (!canReturn()) return false;
+  // Cancel a pending lesson-navigation fallback so it cannot undo the return.
+  if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
+  navWatchdogTimer = null;
+  isNavigatingToLesson = true;
+  window.location.href = target;
   return true;
+}
+
+async function finishCourseAndReturnToPath() {
+  const examLink = document.querySelector('a[href*="/learning/exams/summative/"]');
+  const pendingExam = !!examLink && !isLessonCompleted(examLink.closest('li') || examLink);
+  // Return first. The overview decides whether this course actually needs an exam.
+  if (await returnToLearningPath({ pendingExam })) return true;
+  if (!isBulkActive) return false;
+  if (pendingExam) {
+    isBulkActive = false;
+    await chrome.storage.local.set({ bulkActive: false });
+    const message = 'Course lessons finished. Complete the final exam manually.';
+    showHUD(message, 'warn');
+    sendProgress({ error: true, message });
+    await addLog(message, 'warn');
+    return true;
+  }
+  return false;
 }
 
 // ─── Survey / Feedback Overlay Dismissal ──────────────────────────────────────
@@ -2117,19 +2140,8 @@ async function runAutonomousStep() {
       log(`🎉 All target items in course completed (${completedTarget}/${totalTarget})! Focus Mode: ${activeFocusMode}`);
       await addLog(`🎉 All target items completed! (${completedTarget}/${totalTarget} verified, mode: ${activeFocusMode})`, 'success');
 
-      const examLink = document.querySelector('a[href*="/learning/exams/summative/"]');
-      if (examLink && !isLessonCompleted(examLink.closest('li') || examLink)) {
-        isBulkActive = false;
-        await chrome.storage.local.set({ bulkActive: false });
-        const message = 'Course lessons finished. Complete the final exam manually, then restart the path queue.';
-        showHUD(message, 'warn');
-        sendProgress({ error: true, message });
-        await addLog(message, 'warn');
-        return;
-      }
-
       // If we're in a Learning Path workflow, return to path page instead of stopping
-      const pathReturned = await returnToLearningPath();
+      const pathReturned = await finishCourseAndReturnToPath();
       if (pathReturned) {
         // Keep isBulkActive = true so AutoPilot continues on the next course
         return;
@@ -2358,7 +2370,7 @@ async function advanceToNextItem(syllabus, currentIdx = -1, mode = 'pending_only
     await addLog(`🎉 AutoPilot finished! All ${targetCount} items completed (${mode}).`, 'success');
 
     // If we're in a Learning Path workflow, return to path page instead of stopping
-    const pathReturned = await returnToLearningPath();
+    const pathReturned = await finishCourseAndReturnToPath();
     if (pathReturned) {
       // Keep isBulkActive = true so AutoPilot continues on the next course
       return;
@@ -2504,7 +2516,7 @@ function goToNextLesson() {
     // STRICTLY search within the syllabus sidebar TOC! Never query whole document!
     const sidebar = document.querySelector('.classroom-layout-sidebar-body, .classroom-layout__sidebar-body, .classroom-body__sidebar-body, #course-contents, .classroom-toc');
     if (!sidebar) {
-      returnToLearningPath();
+      returnToLearningPath({ allowAutoplay: true });
       return false;
     }
 
@@ -2529,7 +2541,7 @@ function goToNextLesson() {
       return true;
     } else if (currentIndex !== -1 && currentIndex + 1 >= tocLinks.length) {
       log('Reached end of course syllabus in goToNextLesson. Returning to learning path...');
-      returnToLearningPath();
+      returnToLearningPath({ allowAutoplay: true });
       return true;
     }
   } catch (e) {}
@@ -2900,7 +2912,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     isBulkActive = false;
     learningPathActive = false;
     lastLearningPathUrl = null;
-    chrome.storage.local.set({ bulkActive: false, pathQueueActive: false, autoSolve: false, autoSolveQuizzes: false, learningPathActive: false, lastLearningPathUrl: null });
+    chrome.storage.local.set({ bulkActive: false, pathQueueActive: false, autoSolve: false, autoSolveQuizzes: false, learningPathActive: false, lastLearningPathUrl: null, pathExamNotice: null });
     if (nonVideoTimer) clearTimeout(nonVideoTimer);
     nonVideoTimer = null;
     if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
