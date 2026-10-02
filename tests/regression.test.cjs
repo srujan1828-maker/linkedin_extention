@@ -761,3 +761,83 @@ test('initialization resumes library discovery without restoring the course runn
   c.timers.at(-1)();
   assert.equal(c.window.location.href, 'https://www.linkedin.com/learning/paths/one');
 });
+
+
+function practiceResultFixture(c, completed = true) {
+  const next = {href:'/learning/example/next', fullHref:'https://www.linkedin.com/learning/example/next', title:'Objects as sets', completed:false, isVideo:true};
+  c.window.location.pathname = '/learning/example/quiz/current';
+  c.window.location.href = 'https://www.linkedin.com' + c.window.location.pathname;
+  let continueClicks = 0;
+  const button = text => ({innerText:text, disabled:false, getClientRects:()=>[1], closest:()=>null, getAttribute:()=>null, click:()=>{continueClicks++;}});
+  const main = {innerText:'You answered 2 of 4 questions correctly. Keep practicing! Review your answers and try again.',
+    querySelector:()=>null, querySelectorAll:()=>[button('Review all answers'),button('Continue')], getClientRects:()=>[1]};
+  c.document.querySelector = selector => selector === 'main, .classroom-layout__main, .classroom-body, [role="main"]' ? main : null;
+  c.document.body = main;
+  // Result pages can retain enabled question controls in review markup.
+  c.document.querySelectorAll = selector => selector === '.chapter-quiz-question' ?
+    [{getClientRects:()=>[1], querySelector:()=>({innerText:'Reviewed question'}), querySelectorAll:()=>[{disabled:false}]}] : [];
+  c.ctx.fixtureSyllabus = () => [{href:c.window.location.pathname, title:'Chapter Quiz', completed, isQuiz:true}, next];
+  vm.runInContext('getCourseSyllabus = fixtureSyllabus; expandAllSections = () => {}; showHUD = () => {}; sendProgress = () => {}; isElementClickable = () => true', c.ctx);
+  return {main, next, clicks:()=>continueClicks};
+}
+
+test('Keep practicing result is recognized outside legacy quiz containers', async () => {
+  const c = await content({});
+  practiceResultFixture(c);
+  assert.equal(vm.runInContext('getQuizResultState().visible', c.ctx), true);
+  assert.equal(vm.runInContext('getQuizResultState().passed', c.ctx), false);
+  assert.equal(vm.runInContext('hasActiveQuizQuestion()', c.ctx), false);
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(10)', c.ctx), true);
+});
+
+test('completed practice result resumes AutoPilot without review or AI requests', async () => {
+  const c = await content({});
+  const f = practiceResultFixture(c);
+  let requests = 0;
+  c.chrome.runtime.sendMessage = message => {if (message.action === 'ASK_AI') requests++;};
+  vm.runInContext('isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx), true);
+  assert.equal(c.window.location.href, f.next.fullHref);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), true);
+  assert.equal(vm.runInContext('quizError', c.ctx), null);
+  assert.equal(requests, 0);
+  assert.equal(f.clicks(), 0);
+});
+
+test('solver stops parsing reviewed questions once the current quiz is complete', async () => {
+  const c = await content({});
+  practiceResultFixture(c);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  vm.runInContext('parseCurrentQuizQuestion = () => {throw Error("Result must not be parsed as a question");}', c.ctx);
+  assert.equal(await vm.runInContext('solveLinkedInQuiz()', c.ctx), true);
+  assert.equal(vm.runInContext('quizError', c.ctx), null);
+});
+
+test('a partial score without a completion mark is not verified as completed', async () => {
+  const c = await content({});
+  practiceResultFixture(c, false);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(10)', c.ctx), false);
+});
+
+test('Stop cancels result continuation during the verification storage wait', async () => {
+  const c = await content({});
+  const f = practiceResultFixture(c);
+  let resolveSettings;
+  c.chrome.storage.local.get = () => new Promise(resolve => {resolveSettings = resolve;});
+  const pending = vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  c.runtime[0]({action:'stopBulkComplete'}, {}, noop);
+  resolveSettings({});
+  assert.equal(await pending, true);
+  assert.notEqual(c.window.location.href, f.next.fullHref);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), false);
+});
+
+test('ordinary quiz questions still override old sidebar completion marks', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  vm.runInContext('getCourseSyllabus = () => [{href:window.location.pathname, completed:true}]', c.ctx);
+  assert.equal(vm.runInContext('getQuizResultState().visible', c.ctx), false);
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(10)', c.ctx), false);
+});
