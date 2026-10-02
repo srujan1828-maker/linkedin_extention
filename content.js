@@ -840,13 +840,33 @@ function isInsideSidebar(el) {
   );
 }
 
+function getQuizResultState() {
+  const quiz = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge');
+  const main = document.querySelector('main, .classroom-layout__main, .classroom-body, [role="main"]') || document.body;
+  const passedPattern = /\b(?:you passed|quiz passed|assessment complete|(?:you.ve |you have )?completed (?:the |this )?quiz|quiz completed?)\b/i;
+  for (const root of [...new Set([quiz, main].filter(Boolean))]) {
+    if (root.getClientRects && !root.getClientRects().length) continue;
+    const text = root.innerText || '';
+    const buttons = Array.from(root.querySelectorAll('button, a[role="button"]')).filter(button =>
+      !isInsideSidebar(button) && isElementClickable(button));
+    const resultControls = buttons.some(button =>
+      /^(?:review (?:all )?answers|continue|continue learning|return to course|back to course|next lesson|retake(?: quiz)?)$/i.test((button.innerText || '').trim()));
+    const scored = /\byou (?:have )?answered\s+\d+\s+(?:out\s+)?of\s+\d+\s+questions\b/i.test(text);
+    const passed = passedPattern.test(text);
+    if (passed || (scored && resultControls)) return {visible:true, passed, root};
+  }
+  return {visible:false, passed:false, root:null};
+}
+
 function hasActiveQuizQuestion() {
+  if (getQuizResultState().visible) return false;
   return Array.from(document.querySelectorAll('.chapter-quiz-question')).some(group =>
     group.getClientRects().length > 0 && group.querySelector('.chapter-quiz-question__question-text') &&
     Array.from(group.querySelectorAll('input[type="radio"], input[type="checkbox"]')).some(input => !input.disabled));
 }
 
 function hasPendingQuizStart() {
+  if (getQuizResultState().visible) return false;
   const root = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge');
   return !!root && Array.from(root.querySelectorAll('button')).some(button =>
     /^(?:start|resume|take|begin)\s+quiz$/i.test((button.innerText || '').trim()) && isElementClickable(button));
@@ -1481,6 +1501,10 @@ async function solveLinkedInQuiz() {
       await new Promise((r) => setTimeout(r, 700));
       if (runEpoch !== quizRunEpoch) return false;
 
+      // Results may retain question/review markup, so check completion before
+      // parsing another question or trying to retake a completed practice quiz.
+      if (getQuizResultState().visible && await verifyQuizGreenTick(800, window.location.pathname, runEpoch)) break;
+
       // 1. Check for "Start quiz", "Resume quiz", or "Take quiz" button
       const startBtn = findButtonByText(/start quiz|resume quiz|take quiz|begin quiz|mulai kuis|mulai tes/i);
       if (startBtn && isElementClickable(startBtn)) {
@@ -1775,6 +1799,13 @@ async function solveLinkedInQuiz() {
     return true;
   } catch (err) {
     if (runEpoch !== quizRunEpoch) return false;
+    // A result can appear between parsing and submission. Preserve AutoPilot
+    // when the current quiz has finished instead of reporting a parse failure.
+    if (getQuizResultState().visible && await verifyQuizGreenTick(800, window.location.pathname, runEpoch)) {
+      quizError = null; quizErrorUrl = null;
+      return true;
+    }
+    if (runEpoch !== quizRunEpoch) return false;
     log('Quiz solver error:', err);
     showHUD('❌ Quiz solver error: ' + err.message, 'error');
     quizError = err.message;
@@ -1801,11 +1832,9 @@ async function verifyQuizGreenTick(maxWaitMs = 5000, quizPath = window.location.
     expandAllSections();
     const item = getCourseSyllabus().find(l => l.href === quizPath);
     if (item?.completed) return true;
-    // A different completed quiz or a generic “Results” heading is insufficient.
-    if (window.location.pathname === quizPath) {
-      const root = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge');
-      if (/\b(?:you passed|quiz passed|assessment complete|(?:you.ve |you have )?completed (?:the |this )?quiz|quiz completed?)\b/i.test(root?.innerText || '')) return true;
-    }
+    // A score alone is not completion. Practice quizzes can be marked complete
+    // with "Keep practicing"; assessments still require verified completion.
+    if (window.location.pathname === quizPath && getQuizResultState().passed) return true;
     await new Promise(r => setTimeout(r, 600));
   }
   return false;
@@ -1845,7 +1874,7 @@ async function continueAfterQuiz(quizPath = window.location.pathname, epoch = qu
       continuedQuizUrls.add(quizPath);
       return true;
     }
-    const root = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge');
+    const root = getQuizResultState().root;
     const button = root && Array.from(root.querySelectorAll('button, a[role="button"]')).find(el =>
       /^(?:return to course|back to course|continue learning|next lesson|continue)$/i.test((el.innerText || '').trim()) && isElementClickable(el));
     if (button && allowed()) { button.click(); continuedQuizUrls.add(quizPath); return true; }
@@ -1863,6 +1892,13 @@ async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       if (retryEpoch !== quizRunEpoch) return false;
+      if (getQuizResultState().visible && await verifyQuizGreenTick(800, quizPath, retryEpoch)) {
+        if (retryEpoch !== quizRunEpoch) return false;
+        quizError = null; quizErrorUrl = null;
+        solvedQuizUrls.add(window.location.origin + quizPath);
+        await continueAfterQuiz(quizPath, retryEpoch);
+        return true;
+      }
       log(`Starting Quiz Attempt ${attempt}/${maxRetries}...`);
       showHUD(`🧠 Auto-Solving Quiz: Attempt ${attempt}/${maxRetries}...`);
 
