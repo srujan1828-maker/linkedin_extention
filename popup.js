@@ -736,6 +736,15 @@ ${escapeHtml(data.rawResponse || '')}
         // Automatically switch to the "🧠 AI Solution" tab so user can review answers!
         const quizTabBtn = document.querySelector('.tab-btn[data-tab="quiz"]');
         if (quizTabBtn) quizTabBtn.click();
+      } else {
+        const data = await chrome.storage.local.get(['activityLogs']);
+        const logs = data.activityLogs || [];
+        logs.unshift({ time: new Date().toLocaleTimeString(), type: 'error',
+          message: res?.error || 'Could not connect to the quiz. Reload the extension and refresh LinkedIn.' });
+        await chrome.storage.local.set({ activityLogs: logs.slice(0, 80) });
+        renderLogs(logs);
+        const logTab = document.querySelector('.tab-btn[data-tab="logs"]');
+        if (logTab) logTab.click();
       }
     });
   }

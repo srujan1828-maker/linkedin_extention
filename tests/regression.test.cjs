@@ -64,19 +64,19 @@ test('background play follows the toggle and rejects messages from other windows
 });
 
 async function content(saved) {
-  const messages = [], runtime = [], storage = [], timers = [];
+  const messages = [], runtime = [], storage = [], timers = [], intervals = [], mutations = [];
   let attached = 0;
-  const document = { body: {}, hidden: false, querySelector: () => null, querySelectorAll: () => [], addEventListener: noop };
+  const document = { body: { innerText: '', querySelector: () => null, querySelectorAll: () => [] }, hidden: false, querySelector: () => null, querySelectorAll: () => [], addEventListener: noop };
   const window = { location: { href: 'https://www.linkedin.com/learning/example/lesson', pathname: '/learning/example/lesson', origin: 'https://www.linkedin.com' }, addEventListener: noop, postMessage: m => messages.push(m) };
   const chrome = {
     runtime: { id: 'test', connect: () => ({ onDisconnect: { addListener: noop }, postMessage: noop }), onMessage: { addListener: fn => runtime.push(fn) }, sendMessage: noop },
     storage: { local: { get: async () => saved, set: async data => Object.assign(saved, data) }, onChanged: { addListener: fn => storage.push(fn) } }
   };
-  const ctx = vm.createContext({ window, document, chrome, console, AbortController, URL, URLSearchParams, setInterval: noop, clearInterval: noop, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout: noop, MutationObserver: class { constructor() { attached++; } observe() {} } });
+  const ctx = vm.createContext({ window, document, chrome, console, AbortController, URL, URLSearchParams, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval: noop, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout: noop, MutationObserver: class { constructor(fn) { attached++; mutations.push(fn); } observe() {} } });
   vm.runInContext(source('content.js'), ctx);
   assert.equal(attached, 0, 'player observation must wait for saved settings');
   await new Promise(resolve => setImmediate(resolve));
-  return { ctx, document, window, chrome, saved, messages, runtime, storage, timers, attached };
+  return { ctx, document, window, chrome, saved, messages, runtime, storage, timers, intervals, mutations, attached };
 }
 
 test('saved disabled preferences load before player observation and propagate live', async () => {
@@ -250,7 +250,7 @@ test('quiz verification requires the current quiz and rejects generic results he
   c.ctx.fixture = [{ href: '/learning/example/quiz/old', completed: true }];
   vm.runInContext('getCourseSyllabus = () => fixture; expandAllSections = () => {}', c.ctx);
   c.window.location.pathname = '/learning/example/quiz/current';
-  c.document.querySelector = selector => selector.includes('.chapter-quiz') ? { innerText: 'Results. Keep practicing.' } : null;
+  c.document.querySelector = selector => selector.includes('.chapter-quiz') ? { innerText: 'Results. Keep practicing.', querySelectorAll: () => [] } : null;
   assert.equal(await vm.runInContext('verifyQuizGreenTick(5)', c.ctx), false);
   c.ctx.fixture.push({ href: c.window.location.pathname, completed: true });
   assert.equal(await vm.runInContext('verifyQuizGreenTick(5)', c.ctx), true);
@@ -440,4 +440,123 @@ test('blocked background recovery reports the need to press Play without retry l
   assert.equal(e.posts.at(-1).type, 'LI_BACKGROUND_PLAY_BLOCKED');
   e.emitDocument('pause');
   assert.equal(e.timers.length, 0);
+});
+
+function chapterQuizFixture(c) {
+  let submitted = false, clicks = 0, submissions = 0;
+  const inputs = ['First answer', 'Second answer'].map(text => ({ type: 'radio', disabled: false, checked: false,
+    closest: () => null, click() { inputs.forEach(input => { input.checked = false; }); this.checked = true; clicks++; } }));
+  const cards = inputs.map((input, i) => ({ querySelector(selector) {
+    if (selector.startsWith('input')) return input;
+    if (selector === '.exam-option__label-text') return {innerText:i ? 'Second answer' : 'First answer'};
+    return {innerText:i ? 'Second answer' : 'First answer'};
+  } }));
+  const submit = {innerText:'Submit', disabled:false, closest:()=>null, getAttribute:()=>null,
+    click() { assert.equal(inputs[1].checked, true); submitted = true; submissions++; } };
+  const root = {get innerText() {return submitted ? 'You passed' : 'Question 1 of 1';},
+    querySelector: () => null, querySelectorAll: () => submitted ? [] : [submit]};
+  const group = {getClientRects:()=>[1], querySelector:()=>({innerText:'Which is the second answer?'}),
+    querySelectorAll:selector=>selector.startsWith('input') ? inputs : cards, closest:()=>root};
+  c.window.location.pathname = '/learning/example/quiz/current';
+  c.window.location.href = 'https://www.linkedin.com' + c.window.location.pathname;
+  c.document.querySelector = selector => selector.startsWith('.chapter-quiz,') ? root : null;
+  c.document.querySelectorAll = selector => {
+    if (selector === '.chapter-quiz-question') return submitted ? [] : [group];
+    if (selector.startsWith('button,')) return submitted ? [] : [submit];
+    return [];
+  };
+  c.document.body = {get innerText(){return root.innerText;}, querySelector:()=>null, querySelectorAll:()=>[]};
+  c.ctx.fixtureSyllabus = () => [{href:c.window.location.pathname, title:'Chapter Quiz', completed:submitted}];
+  vm.runInContext('getCourseSyllabus = fixtureSyllabus; expandAllSections = () => {}; showHUD = () => {}; sendProgress = () => {}; isElementClickable = () => true', c.ctx);
+  return { root, inputs, stats:()=>({clicks,submissions,submitted}) };
+}
+
+test('an active chapter question overrides a Viewed completion marker and cached completion', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  vm.runInContext('getCourseSyllabus = () => [{href:window.location.pathname,completed:true}]; solvedQuizUrls.add(window.location.href)', c.ctx);
+  let solves = 0;
+  c.ctx.fakeSolve = async () => { solves++; return true; };
+  vm.runInContext('solveLinkedInQuizWithGreenTickRetry = fakeSolve; checkAndAutoSolveQuiz()', c.ctx);
+  await c.timers.at(-1)();
+  assert.equal(solves, 1);
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(5)', c.ctx), false);
+});
+
+test('late chapter quiz mount triggers through the observer', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  let solves = 0;
+  c.ctx.fakeSolve = async () => { solves++; return true; };
+  vm.runInContext('solveLinkedInQuizWithGreenTickRetry = fakeSolve', c.ctx);
+  c.mutations[0]();
+  await c.timers.at(-1)();
+  assert.equal(solves, 1);
+});
+
+test('watchdog waits on a chapter quiz instead of skipping it as non-video content', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  let skips = 0, checks = 0;
+  c.ctx.fakeNext = () => { skips++; };
+  c.ctx.fakeCheck = () => { checks++; };
+  vm.runInContext('goToNextLesson = fakeNext; checkAndAutoSolveQuiz = fakeCheck', c.ctx);
+  const timerCount = c.timers.length;
+  c.intervals.at(-1)();
+  assert.equal(checks, 1);
+  assert.equal(skips, 0);
+  assert.equal(c.timers.length, timerCount);
+});
+
+test('provider correction clears the current quiz error and schedules a retry', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  vm.runInContext('quizError = "Invalid key"; quizErrorUrl = window.location.href; lastQuizCheckTime = 0', c.ctx);
+  const before = c.timers.length;
+  vm.runInContext('checkAndAutoSolveQuiz()', c.ctx);
+  assert.equal(c.timers.length, before);
+  c.storage[0]({groqApiKey:{newValue:'test-only-key'}}, 'local');
+  assert.equal(vm.runInContext('quizError', c.ctx), null);
+  assert.equal(c.timers.length, before + 1);
+});
+
+test('Stop pauses quiz automation without permanently disabling its preference', async () => {
+  const c = await content({autoSolve:true,autoSolveQuizzes:true});
+  c.runtime[0]({action:'stopBulkComplete'}, {}, noop);
+  assert.equal(c.saved.autoSolve, true);
+  assert.equal(vm.runInContext('autoSolveQuizzes', c.ctx), true);
+  assert.equal(vm.runInContext('quizAutoPaused', c.ctx), true);
+});
+
+test('chapter quiz workflow selects, submits and verifies with one provider request and no duplicate run', async () => {
+  const c = await content({});
+  const fixture = chapterQuizFixture(c);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  let providerCalls = 0, respond;
+  let requestReady;
+  const requested = new Promise(resolve => { requestReady = resolve; });
+  c.chrome.runtime.sendMessage = (request, cb) => {
+    if (request.action === 'ASK_AI') {providerCalls++; respond = cb; requestReady();}
+  };
+  const run = vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx);
+  await requested;
+  assert.equal(await vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx), false);
+  respond({success:true,provider:'Fixture',text:JSON.stringify({answerIndices:[1],answerTexts:['Second answer'],rationale:'Matches the fixture question.'})});
+  assert.equal(await run, true);
+  assert.deepEqual(fixture.stats(), {clicks:1,submissions:1,submitted:true});
+  assert.equal(providerCalls, 1);
+  assert.equal(vm.runInContext('isQuizWorkflowRunning', c.ctx), false);
+});
+
+test('unverified completion pauses bulk mode after bounded retries', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  c.chrome.runtime.sendMessage = (request, cb) => {
+    if (request.action === 'ASK_AI') cb({success:true,text:'{"answerIndices":[1],"answerTexts":["Second answer"]}'});
+  };
+  vm.runInContext('verifyQuizGreenTick = async () => false; isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx), false);
+  assert.equal(c.saved.bulkActive, false);
+  assert.match(vm.runInContext('quizError', c.ctx), /could not be verified/);
 });
