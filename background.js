@@ -518,7 +518,7 @@ async function clearCooldown(providerId) {
 
 // ─── Multi-Provider Dispatcher ────────────────────────────────────────────────
 
-let activeAIRequestPromise = null;
+const activeAIRequests = new Map();
 
 async function executeAIRequest(request) {
   const prompt = request.prompt;
@@ -641,15 +641,16 @@ async function executeAIRequest(request) {
 }
 
 async function handleAIRequest(request) {
-  if (activeAIRequestPromise) return activeAIRequestPromise;
-  activeAIRequestPromise = (async () => {
-    try {
-      return await executeAIRequest(request);
-    } finally {
-      activeAIRequestPromise = null;
-    }
-  })();
-  return activeAIRequestPromise;
+  // Only identical prompts may share a response. Different tabs can ask different questions.
+  const key = request.prompt;
+  if (activeAIRequests.has(key)) return activeAIRequests.get(key);
+  const pending = executeAIRequest(request);
+  activeAIRequests.set(key, pending);
+  try {
+    return await pending;
+  } finally {
+    activeAIRequests.delete(key);
+  }
 }
 
 // ─── Badge Management ─────────────────────────────────────────────────────────
@@ -747,3 +748,4 @@ chrome.runtime.onConnect.addListener((port) => {
     });
   }
 });
+

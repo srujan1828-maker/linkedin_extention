@@ -11,34 +11,34 @@
   if (window.__li_speed_engine_installed__) return;
   window.__li_speed_engine_installed__ = true;
 
-  let forcedSpeed = 16.0;
-  let speedEngineEnabled = true;
+  let forcedSpeed = 1.0;
+  let speedEngineEnabled = false;
+  let backgroundPlayEnabled = false;
 
-  // ─── 1. Page Visibility API Bypass ──────────────────────────────────────────
-  try {
-    Object.defineProperty(document, 'hidden', {
-      get: () => false,
-      configurable: true
-    });
-    Object.defineProperty(document, 'visibilityState', {
-      get: () => 'visible',
-      configurable: true
-    });
-    Object.defineProperty(document, 'webkitHidden', {
-      get: () => false,
-      configurable: true
-    });
-    Object.defineProperty(document, 'webkitVisibilityState', {
-      get: () => 'visible',
-      configurable: true
-    });
-  } catch (e) {}
-
-  ['visibilitychange', 'webkitvisibilitychange'].forEach((evt) => {
-    window.addEventListener(evt, (e) => e.stopImmediatePropagation(), true);
-    document.addEventListener(evt, (e) => e.stopImmediatePropagation(), true);
-  });
-  window.addEventListener('blur', (e) => e.stopImmediatePropagation(), true);
+  // Preserve native visibility unless the user explicitly enables background play.
+  for (const [property, visibleValue] of [
+    ['hidden', false], ['visibilityState', 'visible'],
+    ['webkitHidden', false], ['webkitVisibilityState', 'visible']
+  ]) {
+    let owner = document;
+    let descriptor;
+    while (owner && !descriptor) {
+      descriptor = Object.getOwnPropertyDescriptor(owner, property);
+      owner = Object.getPrototypeOf(owner);
+    }
+    if (!descriptor || !descriptor.get) continue;
+    try {
+      Object.defineProperty(document, property, {
+        get: () => backgroundPlayEnabled ? visibleValue : descriptor.get.call(document),
+        configurable: true
+      });
+    } catch (e) {}
+  }
+  for (const evt of ['visibilitychange', 'webkitvisibilitychange', 'blur']) {
+    window.addEventListener(evt, (e) => {
+      if (backgroundPlayEnabled) e.stopImmediatePropagation();
+    }, true);
+  }
 
   // ─── 2. Pristine Native Descriptor Capture ──────────────────────────────────
   const nativeDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
@@ -65,15 +65,11 @@
   // ─── 4. Override playbackRate on HTMLMediaElement prototype ─────────────────
   Object.defineProperty(HTMLMediaElement.prototype, 'playbackRate', {
     get: function() {
-      // When forced speed is above LinkedIn's 2.0x limit, report 2.0x
-      // This satisfies LinkedIn's player UI/state machine completely without triggering resets
-      if (speedEngineEnabled && forcedSpeed > 2.0) {
-        return 2.0;
-      }
+      // Expose the real rate so the content watchdog does not fight the engine.
       return nativeDescriptor.get.call(this);
     },
     set: function(val) {
-      if (speedEngineEnabled && forcedSpeed > 1.0) {
+      if (speedEngineEnabled && forcedSpeed > 0) {
         nativeDescriptor.set.call(this, forcedSpeed);
       } else {
         nativeDescriptor.set.call(this, val);
@@ -98,10 +94,10 @@
     // Error & buffer underrun auto-recovery: falls back to safe 2.0x then ramps back up
     media.addEventListener('error', () => {
       console.warn('[LI-Learn Speed Engine] Media buffer error detected. Temporarily backing off to 2.0x native rate...');
-      if (forcedSpeed > 2.0) {
+      if (speedEngineEnabled && forcedSpeed > 2.0) {
         try { nativeDescriptor.set.call(media, 2.0); } catch (err) {}
       }
-      try { media.play().catch(() => {}); } catch (err) {}
+      // Recover speed without overriding the user's pause state.
       setTimeout(() => {
         applySpeedSafely(media);
       }, 1500);
@@ -113,11 +109,10 @@
         configurable: true,
         enumerable: true,
         get: function() {
-          if (speedEngineEnabled && forcedSpeed > 2.0) return 2.0;
           return nativeDescriptor.get.call(this);
         },
         set: function(val) {
-          if (speedEngineEnabled && forcedSpeed > 1.0) {
+          if (speedEngineEnabled && forcedSpeed > 0) {
             nativeDescriptor.set.call(this, forcedSpeed);
           } else {
             nativeDescriptor.set.call(this, val);
@@ -130,19 +125,9 @@
   }
 
   function applySpeedSafely(media) {
-    if (!media) return;
+    if (!media || !speedEngineEnabled) return;
     try {
       const target = (speedEngineEnabled && forcedSpeed > 0) ? forcedSpeed : 1.0;
-
-      // Auto-configure audio pipeline for high rates
-      if (target > 2.0) {
-        media.preservesPitch = false;
-        media.webkitPreservesPitch = false;
-        media.mozPreservesPitch = false;
-        if (!media.muted) {
-          media.muted = true;
-        }
-      }
 
       if (media.readyState >= 1) {
         nativeDescriptor.set.call(media, target);
@@ -159,7 +144,7 @@
 
   // ─── 6. Periodic Native Enforcement (Every 250ms) ───────────────────────────
   setInterval(() => {
-    if (!speedEngineEnabled || forcedSpeed <= 1.0) return;
+    if (!speedEngineEnabled) return;
 
     document.querySelectorAll('video').forEach((media) => {
       hookMediaElement(media);
@@ -186,7 +171,11 @@
 
   // ─── 7. Communication Bridge (Message from content script) ───────────────────
   window.addEventListener('message', (event) => {
-    if (!event.data) return;
+    if (event.source !== window || !event.data) return;
+    if (event.data.type === 'LI_SET_BACKGROUND_PLAY') {
+      backgroundPlayEnabled = !!event.data.enabled;
+      return;
+    }
 
     // Speed update message
     if (event.data.type === 'LI_FORCE_SPEED' || event.data.type === 'LI_SET_SPEED') {
@@ -194,13 +183,15 @@
       const enabled = event.data.enabled !== undefined ? !!event.data.enabled : true;
 
       speedEngineEnabled = enabled;
-      if (!enabled || isNaN(speed) || speed <= 1.0) {
-        forcedSpeed = 1.0;
-      } else {
-        forcedSpeed = Math.min(16.0, Math.max(0.25, speed));
-      }
+      forcedSpeed = Number.isFinite(speed) ? Math.min(16.0, Math.max(0.25, speed)) : 1.0;
 
-      applySpeedToAll();
+      if (!enabled) {
+        document.querySelectorAll('video, audio').forEach((media) => {
+          try { nativeDescriptor.set.call(media, 1); } catch (e) {}
+        });
+      } else {
+        applySpeedToAll();
+      }
     }
   });
 
@@ -225,3 +216,4 @@
 
   console.log('[LI-Learn] Main World 16x Speed Engine & React Event Bridge Active.');
 })();
+
