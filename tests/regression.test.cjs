@@ -451,7 +451,7 @@ function chapterQuizFixture(c) {
     if (selector === '.exam-option__label-text') return {innerText:i ? 'Second answer' : 'First answer'};
     return {innerText:i ? 'Second answer' : 'First answer'};
   } }));
-  const submit = {innerText:'Submit', disabled:false, closest:()=>null, getAttribute:()=>null,
+  const submit = {innerText:'Submit', disabled:false, getClientRects:()=>[1], closest:()=>null, getAttribute:()=>null,
     click() { assert.equal(inputs[1].checked, true); submitted = true; submissions++; } };
   const root = {get innerText() {return submitted ? 'You passed' : 'Question 1 of 1';},
     querySelector: () => null, querySelectorAll: () => submitted ? [] : [submit]};
@@ -559,4 +559,84 @@ test('unverified completion pauses bulk mode after bounded retries', async () =>
   assert.equal(await vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx), false);
   assert.equal(c.saved.bulkActive, false);
   assert.match(vm.runInContext('quizError', c.ctx), /could not be verified/);
+});
+
+function surveyFixture(c, {text='Skip survey', aria='', visible=true, disabled=false, context=null} = {}) {
+  let clicks = 0;
+  const button = {innerText:text, textContent:text, disabled, classList:{contains:()=>false},
+    getAttribute:name=>name === 'aria-label' ? aria : null, getClientRects:()=>visible ? [1] : [],
+    closest:selector=>selector.includes('[class*="survey"]') ? context : null,
+    click:()=>{ clicks++; }};
+  c.document.querySelectorAll = selector=>selector === 'button, a, [role="button"], [tabindex]' ? [button] : [];
+  c.window.getComputedStyle = ()=>({display:'block',visibility:'visible',opacity:'1'});
+  vm.runInContext('showHUD = () => {}', c.ctx);
+  return {button,clicks:()=>clicks};
+}
+
+test('ordinary autoplay skips the player survey without bulk mode', async () => {
+  const c = await content({bulkActive:false});
+  const survey = surveyFixture(c);
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(survey.clicks(), 1);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), false);
+});
+
+test('late survey is handled by the observer and the watchdog', async () => {
+  for (const source of ['observer','watchdog']) {
+    const c = await content({});
+    const survey = surveyFixture(c);
+    if (source === 'observer') c.mutations[0]();
+    else c.intervals.at(-1)();
+    assert.equal(survey.clicks(), 1);
+  }
+});
+
+test('survey skip respects autoplay settings, Stop, and hidden/disabled controls', async () => {
+  for (const options of [{autoplay:false},{autoNavigate:false},{skipNonVideos:false}]) {
+    const c = await content(options);
+    const survey = surveyFixture(c);
+    assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+    assert.equal(survey.clicks(), 0);
+  }
+  for (const options of [{visible:false},{disabled:true}]) {
+    const c = await content({});
+    const survey = surveyFixture(c, options);
+    assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+    assert.equal(survey.clicks(), 0);
+  }
+  const c = await content({});
+  const survey = surveyFixture(c);
+  c.runtime[0]({action:'stopBulkComplete'}, {}, noop);
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+  assert.equal(survey.clicks(), 0);
+});
+
+test('generic Close is scoped to a matching survey and never closes a sidebar', async () => {
+  const c = await content({});
+  const sidebar = surveyFixture(c, {text:'Close'});
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+  assert.equal(sidebar.clicks(), 0);
+  const survey = surveyFixture(c, {text:'Close',context:{innerText:'How confident are you that you learned valuable skills from this course?'}});
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(survey.clicks(), 1);
+});
+
+test('survey skip reads aria labels and throttles clicks while dismissal is pending', async () => {
+  const c = await content({});
+  const survey = surveyFixture(c, {text:'',aria:'Skip survey'});
+  c.ctx.timeNow = 1000;
+  vm.runInContext('Date.now = () => timeNow', c.ctx);
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(survey.clicks(), 1);
+  c.ctx.timeNow = 2300;
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(survey.clicks(), 2);
+});
+
+test('survey handling never selects a numeric rating', async () => {
+  const c = await content({});
+  const rating = surveyFixture(c, {text:'5',context:{innerText:'How confident are you that you learned valuable skills from this course?'}});
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+  assert.equal(rating.clicks(), 0);
 });
