@@ -92,7 +92,7 @@ async function callSingleGemini(modelName, apiKey, prompt, useJsonMime = true) {
 
   const bodyPayload = {
     contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { temperature: 0.1, maxOutputTokens: 350 }
+    generationConfig: { temperature: 0.1, maxOutputTokens: 1024 }
   };
 
   if (useJsonMime) {
@@ -173,6 +173,8 @@ async function getGroqCandidateModels(apiKey) {
   // 3. qwen/qwen3.8-27b: Alibaba Qwen on Groq (~490ms)
   // 4. allam-2-7b: compact multilingual
   const priorityList = [
+    'llama-3.3-70b-versatile',
+    'llama-3.1-8b-instant',
     'openai/gpt-oss-120b',
     'openai/gpt-oss-20b',
     'qwen/qwen3.8-27b',
@@ -222,7 +224,7 @@ async function callGroq(apiKey, prompt) {
           { role: 'user', content: prompt }
         ],
         temperature: 0.1,
-        max_tokens: 350,
+        max_tokens: 1024,
         response_format: { type: 'json_object' }
       };
 
@@ -334,7 +336,7 @@ async function callOpenRouter(apiKey, prompt) {
           { role: 'user', content: prompt }
         ],
         temperature: 0.1,
-        max_tokens: 350
+        max_tokens: 1024
       };
 
       const response = await fetch(url, {
@@ -392,28 +394,40 @@ async function discoverNvidiaModels(apiKey) {
 }
 
 async function getNvidiaCandidateModels(apiKey) {
-  const defaultList = [
-    'meta/llama-3.1-8b-instruct',
-    'meta/llama-3.1-70b-instruct',
+  const priorityList = [
     'meta/llama-3.3-70b-instruct',
-    'nvidia/llama-3.1-nemotron-70b-instruct'
+    'meta/llama-3.1-70b-instruct',
+    'nvidia/llama-3.1-nemotron-70b-instruct',
+    'deepseek-ai/deepseek-r1',
+    'mistralai/mistral-large-2-instruct',
+    'qwen/qwen2.5-72b-instruct',
+    'meta/llama-3.1-8b-instruct'
   ];
 
   try {
     const discovered = await discoverNvidiaModels(apiKey);
     if (discovered && discovered.length > 0) {
+      // Strictly exclude diffusion, audio, vision, embed, rerank, guard, reward, or non-text models
+      const eligible = discovered.filter((m) => {
+        const lower = m.toLowerCase();
+        if (/diffusion|audio|vision|embed|rerank|guard|safety|reward|moderation/i.test(lower)) {
+          return false;
+        }
+        return /instruct|chat|nemotron|deepseek|qwen|large/i.test(lower);
+      });
+
       const sorted = [];
-      for (const m of defaultList) {
-        if (discovered.includes(m)) sorted.push(m);
+      for (const p of priorityList) {
+        if (eligible.includes(p)) sorted.push(p);
       }
-      for (const m of discovered) {
+      for (const m of eligible) {
         if (!sorted.includes(m)) sorted.push(m);
       }
       if (sorted.length > 0) return sorted;
     }
   } catch (e) {}
 
-  return defaultList;
+  return priorityList;
 }
 
 async function callNvidia(apiKey, prompt) {
@@ -430,7 +444,7 @@ async function callNvidia(apiKey, prompt) {
           { role: 'user', content: prompt }
         ],
         temperature: 0.1,
-        max_tokens: 350
+        max_tokens: 1024
       };
 
       const response = await fetch(url, {
