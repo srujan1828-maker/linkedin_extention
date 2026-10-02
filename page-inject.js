@@ -15,6 +15,42 @@
   let speedEngineEnabled = false;
   let backgroundPlayEnabled = false;
 
+  let nativeHiddenGetter = null;
+  const nativeHasFocus = typeof document.hasFocus === 'function' ? document.hasFocus.bind(document) : null;
+  let pageBlurred = false;
+  const backgroundCandidates = new Map();
+
+  function actuallyInBackground() {
+    return !!(nativeHiddenGetter?.call(document) || pageBlurred || (nativeHasFocus && !nativeHasFocus()));
+  }
+
+  function rememberPlayingMedia() {
+    if (!backgroundPlayEnabled) return;
+    document.querySelectorAll('video').forEach(media => {
+      if (!media.paused && !media.ended && !backgroundCandidates.has(media)) {
+        backgroundCandidates.set(media, { attempts: 0, pending: false });
+      }
+    });
+  }
+
+  function recoverBackgroundPause(media) {
+    const state = backgroundCandidates.get(media);
+    if (!state || state.pending || state.attempts >= 2) return;
+    state.pending = true;
+    setTimeout(async () => {
+      state.pending = false;
+      if (!backgroundPlayEnabled || backgroundCandidates.get(media) !== state || !actuallyInBackground() ||
+          media.isConnected === false || media.ended || !media.paused) return;
+      state.attempts++;
+      try {
+        await media.play();
+      } catch (error) {
+        backgroundCandidates.delete(media);
+        window.postMessage({ type: 'LI_BACKGROUND_PLAY_BLOCKED' }, '*');
+      }
+    }, 150);
+  }
+
   // Preserve native visibility unless the user explicitly enables background play.
   for (const [property, visibleValue] of [
     ['hidden', false], ['visibilityState', 'visible'],
@@ -27,6 +63,7 @@
       owner = Object.getPrototypeOf(owner);
     }
     if (!descriptor || !descriptor.get) continue;
+    if (property === 'hidden') nativeHiddenGetter = descriptor.get;
     try {
       Object.defineProperty(document, property, {
         get: () => backgroundPlayEnabled ? visibleValue : descriptor.get.call(document),
@@ -34,9 +71,34 @@
       });
     } catch (e) {}
   }
+  if (nativeHasFocus) {
+    try {
+      Object.defineProperty(document, 'hasFocus', {
+        value: () => backgroundPlayEnabled ? true : nativeHasFocus(), configurable: true
+      });
+    } catch (e) {}
+  }
   for (const evt of ['visibilitychange', 'webkitvisibilitychange', 'blur']) {
-    window.addEventListener(evt, (e) => {
+    window.addEventListener(evt, e => {
+      if (e.type === 'blur' && e.target !== window) return;
+      if (e.type === 'blur') pageBlurred = true;
+      if (actuallyInBackground()) rememberPlayingMedia();
+      else backgroundCandidates.clear();
       if (backgroundPlayEnabled) e.stopImmediatePropagation();
+    }, true);
+  }
+  window.addEventListener('focus', e => {
+    if (e.target !== window) return;
+    pageBlurred = false;
+    if (!actuallyInBackground()) backgroundCandidates.clear();
+  }, true);
+  document.addEventListener('pause', e => {
+    if (backgroundPlayEnabled && actuallyInBackground()) recoverBackgroundPause(e.target);
+  }, true);
+  // A real interaction can intentionally pause playback. Never undo that input.
+  for (const evt of ['pointerdown', 'mousedown', 'keydown']) {
+    document.addEventListener(evt, e => {
+      if (e.isTrusted) backgroundCandidates.clear();
     }, true);
   }
 
@@ -174,6 +236,8 @@
     if (event.source !== window || !event.data) return;
     if (event.data.type === 'LI_SET_BACKGROUND_PLAY') {
       backgroundPlayEnabled = !!event.data.enabled;
+      if (!backgroundPlayEnabled) backgroundCandidates.clear();
+      else if (actuallyInBackground()) rememberPlayingMedia();
       return;
     }
 

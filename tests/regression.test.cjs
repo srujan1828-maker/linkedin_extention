@@ -15,13 +15,17 @@ function speedEngine() {
     play() { throw Error('Speed changes must not start playback'); }
   }
   const video = new Media();
-  const listeners = {};
-  const document = Object.create({ get hidden() { return true; }, get visibilityState() { return 'hidden'; } });
-  Object.assign(document, { querySelector: () => video, querySelectorAll: () => [video], addEventListener: noop });
-  const window = { addEventListener: (type, fn) => (listeners[type] ||= []).push(fn) };
-  vm.runInNewContext(source('page-inject.js'), { window, document, HTMLMediaElement: Media, console, setInterval: noop, setTimeout: noop });
+  const listeners = {}, documentListeners = {}, timers = [], posts = [];
+  let nativeHidden = true, nativeFocus = true;
+  const document = Object.create({ get hidden() { return nativeHidden; }, get visibilityState() { return nativeHidden ? 'hidden' : 'visible'; } });
+  Object.assign(document, { querySelector: () => video, querySelectorAll: () => [video], hasFocus: () => nativeFocus, addEventListener: (type, fn) => (documentListeners[type] ||= []).push(fn) });
+  const window = { postMessage: m => posts.push(m), addEventListener: (type, fn) => (listeners[type] ||= []).push(fn) };
+  vm.runInNewContext(source('page-inject.js'), { window, document, HTMLMediaElement: Media, console, setInterval: noop, setTimeout: fn => timers.push(fn) });
   const message = data => listeners.message.forEach(fn => fn({ source: window, data }));
-  return { video, document, window, message, listeners };
+  return { video, document, window, message, listeners, documentListeners, timers, posts,
+    setHidden: value => { nativeHidden = value; }, setFocus: value => { nativeFocus = value; },
+    emitWindow: type => (listeners[type] || []).forEach(fn => fn({type, target:window, stopImmediatePropagation:noop})),
+    emitDocument: (type, event = {}) => (documentListeners[type] || []).forEach(fn => fn({type, target:video, ...event})) }; 
 }
 
 test('engine starts inactive and preserves sound and pause preferences at high rates', () => {
@@ -60,19 +64,19 @@ test('background play follows the toggle and rejects messages from other windows
 });
 
 async function content(saved) {
-  const messages = [], runtime = [], storage = [], timers = [];
+  const messages = [], runtime = [], storage = [], timers = [], intervals = [], mutations = [];
   let attached = 0;
-  const document = { body: {}, hidden: false, querySelector: () => null, querySelectorAll: () => [], addEventListener: noop };
+  const document = { body: { innerText: '', querySelector: () => null, querySelectorAll: () => [] }, hidden: false, querySelector: () => null, querySelectorAll: () => [], addEventListener: noop };
   const window = { location: { href: 'https://www.linkedin.com/learning/example/lesson', pathname: '/learning/example/lesson', origin: 'https://www.linkedin.com' }, addEventListener: noop, postMessage: m => messages.push(m) };
   const chrome = {
     runtime: { id: 'test', connect: () => ({ onDisconnect: { addListener: noop }, postMessage: noop }), onMessage: { addListener: fn => runtime.push(fn) }, sendMessage: noop },
     storage: { local: { get: async () => saved, set: async data => Object.assign(saved, data) }, onChanged: { addListener: fn => storage.push(fn) } }
   };
-  const ctx = vm.createContext({ window, document, chrome, console, AbortController, URL, URLSearchParams, setInterval: noop, clearInterval: noop, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout: noop, MutationObserver: class { constructor() { attached++; } observe() {} } });
+  const ctx = vm.createContext({ window, document, chrome, console, AbortController, URL, URLSearchParams, setInterval: fn => { intervals.push(fn); return intervals.length; }, clearInterval: noop, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout: noop, MutationObserver: class { constructor(fn) { attached++; mutations.push(fn); } observe() {} } });
   vm.runInContext(source('content.js'), ctx);
   assert.equal(attached, 0, 'player observation must wait for saved settings');
   await new Promise(resolve => setImmediate(resolve));
-  return { ctx, document, window, chrome, saved, messages, runtime, storage, timers, attached };
+  return { ctx, document, window, chrome, saved, messages, runtime, storage, timers, intervals, mutations, attached };
 }
 
 test('saved disabled preferences load before player observation and propagate live', async () => {
@@ -246,7 +250,7 @@ test('quiz verification requires the current quiz and rejects generic results he
   c.ctx.fixture = [{ href: '/learning/example/quiz/old', completed: true }];
   vm.runInContext('getCourseSyllabus = () => fixture; expandAllSections = () => {}', c.ctx);
   c.window.location.pathname = '/learning/example/quiz/current';
-  c.document.querySelector = selector => selector.includes('.chapter-quiz') ? { innerText: 'Results. Keep practicing.' } : null;
+  c.document.querySelector = selector => selector.includes('.chapter-quiz') ? { innerText: 'Results. Keep practicing.', querySelectorAll: () => [] } : null;
   assert.equal(await vm.runInContext('verifyQuizGreenTick(5)', c.ctx), false);
   c.ctx.fixture.push({ href: c.window.location.pathname, completed: true });
   assert.equal(await vm.runInContext('verifyQuizGreenTick(5)', c.ctx), true);
@@ -353,4 +357,286 @@ test('return respects disabled navigation and cancels old lesson fallbacks', asy
   assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), true);
   assert.equal(cancelled, 42);
   assert.equal(vm.runInContext('navWatchdogTimer', c.ctx), null);
+});
+
+
+test('background toggle restores native focus when disabled and never starts paused media', () => {
+  const e = speedEngine();
+  e.setFocus(false);
+  assert.equal(e.document.hasFocus(), false);
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+  assert.equal(e.document.hasFocus(), true);
+  assert.equal(e.video.paused, true);
+  assert.equal(e.timers.length, 0);
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: false });
+  assert.equal(e.document.hasFocus(), false);
+});
+
+test('tab-switch pause resumes previously playing media outside bulk mode', async () => {
+  const e = speedEngine();
+  e.setHidden(false);
+  e.video.paused = false;
+  let plays = 0;
+  e.video.play = async () => { plays++; e.video.paused = false; };
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+  e.setHidden(true);
+  e.emitWindow('visibilitychange');
+  e.video.paused = true;
+  e.emitDocument('pause');
+  assert.equal(e.timers.length, 1);
+  await e.timers.shift()();
+  assert.equal(plays, 1);
+  assert.equal(e.video.paused, false);
+});
+
+test('trusted pause input or disabling background play cancels scheduled recovery', async () => {
+  for (const cancel of ['input', 'disable']) {
+    const e = speedEngine();
+    e.setHidden(false);
+    e.video.paused = false;
+    let plays = 0;
+    e.video.play = async () => { plays++; };
+    e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+    e.emitWindow('blur');
+    e.video.paused = true;
+    e.emitDocument('pause');
+    if (cancel === 'input') e.emitDocument('keydown', {isTrusted:true});
+    else e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: false });
+    await e.timers.shift()();
+    assert.equal(plays, 0);
+  }
+});
+
+test('foreground pauses remain paused and recovery is bounded for repeated background pauses', async () => {
+  const e = speedEngine();
+  e.setHidden(false);
+  e.video.paused = false;
+  let plays = 0;
+  e.video.play = async () => { plays++; e.video.paused = false; };
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+  e.video.paused = true;
+  e.emitDocument('pause');
+  assert.equal(e.timers.length, 0);
+  e.video.paused = false;
+  e.emitWindow('blur');
+  for (let i = 0; i < 3; i++) {
+    e.video.paused = true;
+    e.emitDocument('pause');
+    if (e.timers.length) await e.timers.shift()();
+  }
+  assert.equal(plays, 2);
+});
+
+test('blocked background recovery reports the need to press Play without retry loops', async () => {
+  const e = speedEngine();
+  e.setHidden(false);
+  e.video.paused = false;
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+  e.emitWindow('blur');
+  e.video.paused = true;
+  e.video.play = async () => { throw Error('NotAllowedError'); };
+  e.emitDocument('pause');
+  await e.timers.shift()();
+  assert.equal(e.posts.at(-1).type, 'LI_BACKGROUND_PLAY_BLOCKED');
+  e.emitDocument('pause');
+  assert.equal(e.timers.length, 0);
+});
+
+function chapterQuizFixture(c) {
+  let submitted = false, clicks = 0, submissions = 0;
+  const inputs = ['First answer', 'Second answer'].map(text => ({ type: 'radio', disabled: false, checked: false,
+    closest: () => null, click() { inputs.forEach(input => { input.checked = false; }); this.checked = true; clicks++; } }));
+  const cards = inputs.map((input, i) => ({ querySelector(selector) {
+    if (selector.startsWith('input')) return input;
+    if (selector === '.exam-option__label-text') return {innerText:i ? 'Second answer' : 'First answer'};
+    return {innerText:i ? 'Second answer' : 'First answer'};
+  } }));
+  const submit = {innerText:'Submit', disabled:false, getClientRects:()=>[1], closest:()=>null, getAttribute:()=>null,
+    click() { assert.equal(inputs[1].checked, true); submitted = true; submissions++; } };
+  const root = {get innerText() {return submitted ? 'You passed' : 'Question 1 of 1';},
+    querySelector: () => null, querySelectorAll: () => submitted ? [] : [submit]};
+  const group = {getClientRects:()=>[1], querySelector:()=>({innerText:'Which is the second answer?'}),
+    querySelectorAll:selector=>selector.startsWith('input') ? inputs : cards, closest:()=>root};
+  c.window.location.pathname = '/learning/example/quiz/current';
+  c.window.location.href = 'https://www.linkedin.com' + c.window.location.pathname;
+  c.document.querySelector = selector => selector.startsWith('.chapter-quiz,') ? root : null;
+  c.document.querySelectorAll = selector => {
+    if (selector === '.chapter-quiz-question') return submitted ? [] : [group];
+    if (selector.startsWith('button,')) return submitted ? [] : [submit];
+    return [];
+  };
+  c.document.body = {get innerText(){return root.innerText;}, querySelector:()=>null, querySelectorAll:()=>[]};
+  c.ctx.fixtureSyllabus = () => [{href:c.window.location.pathname, title:'Chapter Quiz', completed:submitted}];
+  vm.runInContext('getCourseSyllabus = fixtureSyllabus; expandAllSections = () => {}; showHUD = () => {}; sendProgress = () => {}; isElementClickable = () => true', c.ctx);
+  return { root, inputs, stats:()=>({clicks,submissions,submitted}) };
+}
+
+test('an active chapter question overrides a Viewed completion marker and cached completion', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  vm.runInContext('getCourseSyllabus = () => [{href:window.location.pathname,completed:true}]; solvedQuizUrls.add(window.location.href)', c.ctx);
+  let solves = 0;
+  c.ctx.fakeSolve = async () => { solves++; return true; };
+  vm.runInContext('solveLinkedInQuizWithGreenTickRetry = fakeSolve; checkAndAutoSolveQuiz()', c.ctx);
+  await c.timers.at(-1)();
+  assert.equal(solves, 1);
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(5)', c.ctx), false);
+});
+
+test('late chapter quiz mount triggers through the observer', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  let solves = 0;
+  c.ctx.fakeSolve = async () => { solves++; return true; };
+  vm.runInContext('solveLinkedInQuizWithGreenTickRetry = fakeSolve', c.ctx);
+  c.mutations[0]();
+  await c.timers.at(-1)();
+  assert.equal(solves, 1);
+});
+
+test('watchdog waits on a chapter quiz instead of skipping it as non-video content', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  let skips = 0, checks = 0;
+  c.ctx.fakeNext = () => { skips++; };
+  c.ctx.fakeCheck = () => { checks++; };
+  vm.runInContext('goToNextLesson = fakeNext; checkAndAutoSolveQuiz = fakeCheck', c.ctx);
+  const timerCount = c.timers.length;
+  c.intervals.at(-1)();
+  assert.equal(checks, 1);
+  assert.equal(skips, 0);
+  assert.equal(c.timers.length, timerCount);
+});
+
+test('provider correction clears the current quiz error and schedules a retry', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  vm.runInContext('quizError = "Invalid key"; quizErrorUrl = window.location.href; lastQuizCheckTime = 0', c.ctx);
+  const before = c.timers.length;
+  vm.runInContext('checkAndAutoSolveQuiz()', c.ctx);
+  assert.equal(c.timers.length, before);
+  c.storage[0]({groqApiKey:{newValue:'test-only-key'}}, 'local');
+  assert.equal(vm.runInContext('quizError', c.ctx), null);
+  assert.equal(c.timers.length, before + 1);
+});
+
+test('Stop pauses quiz automation without permanently disabling its preference', async () => {
+  const c = await content({autoSolve:true,autoSolveQuizzes:true});
+  c.runtime[0]({action:'stopBulkComplete'}, {}, noop);
+  assert.equal(c.saved.autoSolve, true);
+  assert.equal(vm.runInContext('autoSolveQuizzes', c.ctx), true);
+  assert.equal(vm.runInContext('quizAutoPaused', c.ctx), true);
+});
+
+test('chapter quiz workflow selects, submits and verifies with one provider request and no duplicate run', async () => {
+  const c = await content({});
+  const fixture = chapterQuizFixture(c);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  let providerCalls = 0, respond;
+  let requestReady;
+  const requested = new Promise(resolve => { requestReady = resolve; });
+  c.chrome.runtime.sendMessage = (request, cb) => {
+    if (request.action === 'ASK_AI') {providerCalls++; respond = cb; requestReady();}
+  };
+  const run = vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx);
+  await requested;
+  assert.equal(await vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx), false);
+  respond({success:true,provider:'Fixture',text:JSON.stringify({answerIndices:[1],answerTexts:['Second answer'],rationale:'Matches the fixture question.'})});
+  assert.equal(await run, true);
+  assert.deepEqual(fixture.stats(), {clicks:1,submissions:1,submitted:true});
+  assert.equal(providerCalls, 1);
+  assert.equal(vm.runInContext('isQuizWorkflowRunning', c.ctx), false);
+});
+
+test('unverified completion pauses bulk mode after bounded retries', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  c.chrome.runtime.sendMessage = (request, cb) => {
+    if (request.action === 'ASK_AI') cb({success:true,text:'{"answerIndices":[1],"answerTexts":["Second answer"]}'});
+  };
+  vm.runInContext('verifyQuizGreenTick = async () => false; isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx), false);
+  assert.equal(c.saved.bulkActive, false);
+  assert.match(vm.runInContext('quizError', c.ctx), /could not be verified/);
+});
+
+function surveyFixture(c, {text='Skip survey', aria='', visible=true, disabled=false, context=null} = {}) {
+  let clicks = 0;
+  const button = {innerText:text, textContent:text, disabled, classList:{contains:()=>false},
+    getAttribute:name=>name === 'aria-label' ? aria : null, getClientRects:()=>visible ? [1] : [],
+    closest:selector=>selector.includes('[class*="survey"]') ? context : null,
+    click:()=>{ clicks++; }};
+  c.document.querySelectorAll = selector=>selector === 'button, a, [role="button"], [tabindex]' ? [button] : [];
+  c.window.getComputedStyle = ()=>({display:'block',visibility:'visible',opacity:'1'});
+  vm.runInContext('showHUD = () => {}', c.ctx);
+  return {button,clicks:()=>clicks};
+}
+
+test('ordinary autoplay skips the player survey without bulk mode', async () => {
+  const c = await content({bulkActive:false});
+  const survey = surveyFixture(c);
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(survey.clicks(), 1);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), false);
+});
+
+test('late survey is handled by the observer and the watchdog', async () => {
+  for (const source of ['observer','watchdog']) {
+    const c = await content({});
+    const survey = surveyFixture(c);
+    if (source === 'observer') c.mutations[0]();
+    else c.intervals.at(-1)();
+    assert.equal(survey.clicks(), 1);
+  }
+});
+
+test('survey skip respects autoplay settings, Stop, and hidden/disabled controls', async () => {
+  for (const options of [{autoplay:false},{autoNavigate:false},{skipNonVideos:false}]) {
+    const c = await content(options);
+    const survey = surveyFixture(c);
+    assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+    assert.equal(survey.clicks(), 0);
+  }
+  for (const options of [{visible:false},{disabled:true}]) {
+    const c = await content({});
+    const survey = surveyFixture(c, options);
+    assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+    assert.equal(survey.clicks(), 0);
+  }
+  const c = await content({});
+  const survey = surveyFixture(c);
+  c.runtime[0]({action:'stopBulkComplete'}, {}, noop);
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+  assert.equal(survey.clicks(), 0);
+});
+
+test('generic Close is scoped to a matching survey and never closes a sidebar', async () => {
+  const c = await content({});
+  const sidebar = surveyFixture(c, {text:'Close'});
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+  assert.equal(sidebar.clicks(), 0);
+  const survey = surveyFixture(c, {text:'Close',context:{innerText:'How confident are you that you learned valuable skills from this course?'}});
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(survey.clicks(), 1);
+});
+
+test('survey skip reads aria labels and throttles clicks while dismissal is pending', async () => {
+  const c = await content({});
+  const survey = surveyFixture(c, {text:'',aria:'Skip survey'});
+  c.ctx.timeNow = 1000;
+  vm.runInContext('Date.now = () => timeNow', c.ctx);
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(survey.clicks(), 1);
+  c.ctx.timeNow = 2300;
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), true);
+  assert.equal(survey.clicks(), 2);
+});
+
+test('survey handling never selects a numeric rating', async () => {
+  const c = await content({});
+  const rating = surveyFixture(c, {text:'5',context:{innerText:'How confident are you that you learned valuable skills from this course?'}});
+  assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
+  assert.equal(rating.clicks(), 0);
 });

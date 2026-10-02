@@ -30,6 +30,9 @@ let isBulkActive = false;
 let isSolvingQuiz = false;
 let quizRunEpoch = 0;
 let quizError = null;
+let quizErrorUrl = null;
+let quizAutoPaused = false;
+let isQuizWorkflowRunning = false;
 let videoEl = null;
 let watchdogInterval = null;
 let lastRecordedTime = -1;
@@ -690,69 +693,37 @@ async function finishCourseAndReturnToPath() {
  * by clicking "Skip survey", "No thanks", "Dismiss", or similar dismiss buttons.
  * Returns true if a survey was found and dismissed.
  */
+const surveySkipAttempts = new WeakMap();
+
+function shouldAutoSkipSurvey() {
+  return !quizAutoPaused && (isBulkActive || (autoplayEnabled && autoNavigateEnabled && skipNonVideos));
+}
+
 function dismissSurveyIfPresent() {
-  // Check if a survey/feedback overlay is visible on the page
-  const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
-  const hasSurvey =
-    /how confident are you/i.test(bodyText) ||
-    /help us improve/i.test(bodyText) ||
-    /skip survey/i.test(bodyText) ||
-    /rate this course/i.test(bodyText) ||
-    /rate your experience/i.test(bodyText) ||
-    /provide feedback/i.test(bodyText) ||
-    /would you recommend/i.test(bodyText) ||
-    /not very confident.*very confident/i.test(bodyText);
-
-  if (!hasSurvey) return false;
-
-  // Try to find and click "Skip survey" or similar dismiss buttons
-  const dismissPatterns = [
-    /^skip survey$/i,
-    /^skip$/i,
-    /^no thanks$/i,
-    /^dismiss$/i,
-    /^close$/i,
-    /^not now$/i,
-    /^lewati survei$/i,        // Indonesian
-    /^lewati$/i,
-    /^omitir encuesta$/i,      // Spanish
-    /^passer le sondage$/i,    // French
-    /^umfrage überspringen$/i  // German
-  ];
-
-  const allClickable = Array.from(document.querySelectorAll(
-    'button, a, [role="button"], span[tabindex], div[tabindex], [class*="skip"], [class*="dismiss"], [class*="close"]'
-  ));
-
-  for (const pattern of dismissPatterns) {
-    for (const el of allClickable) {
-      if (isLanguageElement(el)) continue;
-      const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
-      if (pattern.test(text) && isElementClickable(el)) {
-        log('Survey detected! Clicking:', text);
-        showHUD('⏭️ Skipping survey...', 'info');
-        clickElement(el);
-        return true;
-      }
+  if (!shouldAutoSkipSurvey()) return false;
+  const explicit = /^(?:skip survey|lewati survei|omitir encuesta|passer le sondage|umfrage überspringen)$/i;
+  const generic = /^(?:skip|no thanks|dismiss|close|not now|lewati)$/i;
+  const surveyPrompt = /how confident are you.*(?:learned|course)|rate (?:this course|your experience)|would you recommend.*course|not very confident.*very confident/i;
+  const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], [tabindex]'));
+  for (const candidate of candidates) {
+    if (isLanguageElement(candidate) || !isElementClickable(candidate) || candidate.getClientRects().length === 0) continue;
+    const text = (candidate.innerText || candidate.textContent || '').replace(/\s+/g, ' ').trim();
+    const aria = (candidate.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    let matches = explicit.test(text) || explicit.test(aria);
+    if (!matches && (generic.test(text) || generic.test(aria) || /^(?:close|dismiss) (?:survey|feedback)$/i.test(aria))) {
+      const survey = candidate.closest('[class*="survey"], [class*="feedback"], [role="dialog"]');
+      matches = !!survey && surveyPrompt.test((survey.innerText || '').replace(/\s+/g, ' '));
     }
+    if (!matches) continue;
+    const lastAttempt = surveySkipAttempts.get(candidate);
+    if (lastAttempt !== undefined && Date.now() - lastAttempt < 1200) return true;
+    surveySkipAttempts.set(candidate, Date.now());
+    log('Skipping course survey:', text || aria);
+    showHUD('⏭️ Skipping survey...', 'info');
+    // A native click invokes LinkedIn's skip handler without submitting a rating.
+    candidate.click();
+    return true;
   }
-
-  // Fallback: try clicking an X/close button on the overlay
-  const closeButtons = document.querySelectorAll(
-    '[aria-label*="close" i], [aria-label*="dismiss" i], [aria-label*="tutup" i], [data-test-modal-close], .modal-close, .artdeco-modal__dismiss'
-  );
-  for (const btn of closeButtons) {
-    if (isLanguageElement(btn)) continue;
-    // Only click if it's inside a survey/feedback context
-    const parent = btn.closest('[class*="survey"], [class*="feedback"], [class*="modal"], [class*="overlay"], [role="dialog"]');
-    if (parent && isElementClickable(btn)) {
-      log('Survey overlay detected! Clicking close button.');
-      showHUD('⏭️ Closing survey overlay...', 'info');
-      clickElement(btn);
-      return true;
-    }
-  }
-
   return false;
 }
 
@@ -866,10 +837,22 @@ function isInsideSidebar(el) {
   );
 }
 
+function hasActiveQuizQuestion() {
+  return Array.from(document.querySelectorAll('.chapter-quiz-question')).some(group =>
+    group.getClientRects().length > 0 && group.querySelector('.chapter-quiz-question__question-text') &&
+    Array.from(group.querySelectorAll('input[type="radio"], input[type="checkbox"]')).some(input => !input.disabled));
+}
+
+function hasPendingQuizStart() {
+  const root = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge');
+  return !!root && Array.from(root.querySelectorAll('button')).some(button =>
+    /^(?:start|resume|take|begin)\s+quiz$/i.test((button.innerText || '').trim()) && isElementClickable(button));
+}
+
 function isQuizOnPage() {
   const mainArea = document.querySelector('main, .classroom-layout__main, .classroom-body, [role="main"]') || document.body;
   const hasCounterOnPage = !!mainArea.querySelector('.quiz-challenge__counter, [class*="question-counter"], .quiz-step-counter');
-  const hasQuizCard = !!mainArea.querySelector('.quiz-challenge, [class*="quiz-challenge"], .classroom-quiz');
+  const hasQuizCard = !!mainArea.querySelector('.chapter-quiz, .chapter-quiz-question, .quiz-challenge, [class*="quiz-challenge"], .classroom-quiz');
   const bodyText = (document.body ? document.body.innerText : '');
   const hasCounterText = /(?:question|pertanyaan|pregunta|frage)\s+\d+\s+(?:of|dari|de|von|\/)\s+\d+/i.test(bodyText);
 
@@ -993,7 +976,7 @@ function parseCurrentQuizQuestion() {
       const text = card.querySelector('.exam-option__label-text')?.innerText?.trim();
       return { input, label, target: input, text, rawText: text };
     });
-    if (!prompt || options.length < 2 || options.some(o => !o.input || !o.text) ||
+    if (!prompt || options.length < 2 || options.some(o => !o.input || o.input.disabled || !o.text) ||
         new Set(options.map(o => o.input.type)).size !== 1) return null;
     const root = group.closest('.chapter-quiz') || group;
     const counter = (root.innerText || '').match(/Question\s+\d+\s+of\s+\d+/i)?.[0] || '';
@@ -1622,8 +1605,7 @@ async function solveLinkedInQuiz() {
           break;
         }
 
-        log('No active question or navigation buttons detected. Finishing loop.');
-        break;
+        throw new Error('Could not read an active quiz question. Wait for the quiz to load, then click Solve Current Quiz.');
       }
 
       // Anti-loop safeguard: check if stuck on the exact same prompt
@@ -1790,6 +1772,7 @@ async function solveLinkedInQuiz() {
     log('Quiz solver error:', err);
     showHUD('❌ Quiz solver error: ' + err.message, 'error');
     quizError = err.message;
+    quizErrorUrl = window.location.href.split('?')[0].split('#')[0];
     if (isBulkActive) {
       isBulkActive = false;
       await chrome.storage.local.set({ bulkActive: false });
@@ -1808,6 +1791,7 @@ async function verifyQuizGreenTick(maxWaitMs = 5000, quizPath = window.location.
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     if (epoch !== quizRunEpoch) return false;
+    if (window.location.pathname === quizPath && (hasActiveQuizQuestion() || hasPendingQuizStart())) return false;
     expandAllSections();
     const item = getCourseSyllabus().find(l => l.href === quizPath);
     if (item?.completed) return true;
@@ -1822,91 +1806,101 @@ async function verifyQuizGreenTick(maxWaitMs = 5000, quizPath = window.location.
 }
 
 async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
-  if (isSolvingQuiz) return false;
-  const retryEpoch = quizRunEpoch;
-  const quizPath = window.location.pathname;
+  if (isSolvingQuiz || isQuizWorkflowRunning) return false;
+  isQuizWorkflowRunning = true;
+  try {
+    const retryEpoch = quizRunEpoch;
+    const quizPath = window.location.pathname;
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    if (retryEpoch !== quizRunEpoch) return false;
-    log(`Starting Quiz Attempt ${attempt}/${maxRetries}...`);
-    showHUD(`🧠 Auto-Solving Quiz: Attempt ${attempt}/${maxRetries}...`);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (retryEpoch !== quizRunEpoch) return false;
+      log(`Starting Quiz Attempt ${attempt}/${maxRetries}...`);
+      showHUD(`🧠 Auto-Solving Quiz: Attempt ${attempt}/${maxRetries}...`);
 
-    const solved = await solveLinkedInQuiz();
-    if (!solved || quizError) return false;
+      const solved = await solveLinkedInQuiz();
+      if (!solved || quizError) return false;
 
-    // Pause 2s for LinkedIn backend to process answers and update checkmark
-    showHUD('⏳ Verifying green tick in syllabus...');
-    await new Promise((r) => setTimeout(r, 2000));
+      // Pause 2s for LinkedIn backend to process answers and update checkmark
+      showHUD('⏳ Verifying green tick in syllabus...');
+      await new Promise((r) => setTimeout(r, 2000));
 
-    const isVerified = await verifyQuizGreenTick(4000, quizPath, retryEpoch);
-    if (retryEpoch !== quizRunEpoch) return false;
-    if (isVerified) {
-      log('🎉 Green tick / Completion CONFIRMED on quiz!');
-      showHUD('✅ Verified! Quiz completed.', 'success');
-      sendProgress({ message: '🎉 Chapter Quiz verified!' });
+      const isVerified = await verifyQuizGreenTick(4000, quizPath, retryEpoch);
+      if (retryEpoch !== quizRunEpoch) return false;
+      if (isVerified) {
+        log('🎉 Green tick / Completion CONFIRMED on quiz!');
+        showHUD('✅ Verified! Quiz completed.', 'success');
+        sendProgress({ message: '🎉 Chapter Quiz verified!' });
 
-      // Click lingering "Return to course" or "Submit and continue" now that quiz is verified
-      const lingeringSubmit = findButtonByText(/return to course|back to course|kembali ke kursus|submit and continue|next lesson/i);
-      if (lingeringSubmit && isElementClickable(lingeringSubmit) && !isForbiddenQuizButton(lingeringSubmit)) {
-        log('Clicking final return / continue button:', lingeringSubmit.innerText);
-        if (retryEpoch !== quizRunEpoch) return false;
-        clickElement(lingeringSubmit);
-        await new Promise((r) => setTimeout(r, 2000));
-      }
-      return true;
-    }
-
-    // No green tick verified -> Retry
-    log(`⚠️ Attempt ${attempt}: No green tick detected on syllabus. Retrying quiz...`);
-    showHUD(`⚠️ Quiz not passed. Retrying quiz (attempt ${attempt + 1})...`, 'warn');
-
-    if (attempt < maxRetries) {
-      await new Promise((r) => setTimeout(r, 1200));
-
-      // 1. Look for Retake / Try again / Take quiz again button
-      const retakeBtn = findButtonByText(
-        /^retake$|retake quiz|take quiz again|try again|restart quiz|take again|resume exam|retake exam|take exam|resume quiz|retake assessment/i
-      );
-      if (retakeBtn && isElementClickable(retakeBtn)) {
-        log('Clicking Retake Quiz button:', retakeBtn.innerText);
-        showHUD(`▶ Clicking "${retakeBtn.innerText}"...`);
-        if (retryEpoch !== quizRunEpoch) return false;
-        clickElement(retakeBtn);
-        await new Promise((r) => setTimeout(r, 2000));
-      } else {
-        // 2. Check for "Review all answers" button to see explanations and reveal Retake button
-        const reviewBtn = findButtonByText(/review all answers|review answers|tinjau jawaban/i);
-        if (reviewBtn && isElementClickable(reviewBtn)) {
-          log('Clicking Review all answers to learn correct options:', reviewBtn.innerText);
+        // Click lingering "Return to course" or "Submit and continue" now that quiz is verified
+        const lingeringSubmit = findButtonByText(/return to course|back to course|kembali ke kursus|submit and continue|next lesson/i);
+        if (lingeringSubmit && isElementClickable(lingeringSubmit) && !isForbiddenQuizButton(lingeringSubmit)) {
+          log('Clicking final return / continue button:', lingeringSubmit.innerText);
           if (retryEpoch !== quizRunEpoch) return false;
-          clickElement(reviewBtn);
+          clickElement(lingeringSubmit);
           await new Promise((r) => setTimeout(r, 2000));
-          learnFromQuizReviewScreen();
-          const retakeAfter = findButtonByText(/^retake$|retake quiz|take quiz again|try again|restart quiz/i);
-          if (retakeAfter && isElementClickable(retakeAfter)) {
-            if (retryEpoch !== quizRunEpoch) return false;
-            clickElement(retakeAfter);
-            await new Promise((r) => setTimeout(r, 2000));
-          }
+        }
+        return true;
+      }
+
+      // No green tick verified -> Retry
+      log(`⚠️ Attempt ${attempt}: No green tick detected on syllabus. Retrying quiz...`);
+      showHUD(`⚠️ Quiz not passed. Retrying quiz (attempt ${attempt + 1})...`, 'warn');
+
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, 1200));
+
+        // 1. Look for Retake / Try again / Take quiz again button
+        const retakeBtn = findButtonByText(
+          /^retake$|retake quiz|take quiz again|try again|restart quiz|take again|resume exam|retake exam|take exam|resume quiz|retake assessment/i
+        );
+        if (retakeBtn && isElementClickable(retakeBtn)) {
+          log('Clicking Retake Quiz button:', retakeBtn.innerText);
+          showHUD(`▶ Clicking "${retakeBtn.innerText}"...`);
+          if (retryEpoch !== quizRunEpoch) return false;
+          clickElement(retakeBtn);
+          await new Promise((r) => setTimeout(r, 2000));
         } else {
-          // 3. Fallback: Click Chapter Quiz in TOC sidebar to restart the quiz attempt
-          const tocQuiz = document.querySelector(
-            'li.classroom-toc-item--selected a, #course-contents a[href*="/quiz/"]'
-          );
-          if (tocQuiz && isElementClickable(tocQuiz)) {
-            log('Clicking Chapter Quiz in TOC sidebar to reset attempt...');
+          // 2. Check for "Review all answers" button to see explanations and reveal Retake button
+          const reviewBtn = findButtonByText(/review all answers|review answers|tinjau jawaban/i);
+          if (reviewBtn && isElementClickable(reviewBtn)) {
+            log('Clicking Review all answers to learn correct options:', reviewBtn.innerText);
             if (retryEpoch !== quizRunEpoch) return false;
-            clickElement(tocQuiz);
-            await new Promise((r) => setTimeout(r, 2500));
+            clickElement(reviewBtn);
+            await new Promise((r) => setTimeout(r, 2000));
+            learnFromQuizReviewScreen();
+            const retakeAfter = findButtonByText(/^retake$|retake quiz|take quiz again|try again|restart quiz/i);
+            if (retakeAfter && isElementClickable(retakeAfter)) {
+              if (retryEpoch !== quizRunEpoch) return false;
+              clickElement(retakeAfter);
+              await new Promise((r) => setTimeout(r, 2000));
+            }
+          } else {
+            // 3. Fallback: Click Chapter Quiz in TOC sidebar to restart the quiz attempt
+            const tocQuiz = document.querySelector(
+              'li.classroom-toc-item--selected a, #course-contents a[href*="/quiz/"]'
+            );
+            if (tocQuiz && isElementClickable(tocQuiz)) {
+              log('Clicking Chapter Quiz in TOC sidebar to reset attempt...');
+              if (retryEpoch !== quizRunEpoch) return false;
+              clickElement(tocQuiz);
+              await new Promise((r) => setTimeout(r, 2500));
+            }
           }
         }
       }
     }
-  }
 
-  log('Reached maximum quiz retry attempts.');
-  showHUD('❌ Quiz not verified by green tick after retries.', 'error');
-  return false;
+    quizError = 'Quiz completion could not be verified after retries. Check the Activity Log and retry manually.';
+    quizErrorUrl = window.location.href.split('?')[0].split('#')[0];
+    if (isBulkActive) { isBulkActive = false; await chrome.storage.local.set({bulkActive:false}); }
+    await addLog(quizError, 'error');
+    sendProgress({error:true,message:quizError});
+    log('Reached maximum quiz retry attempts.');
+    showHUD('❌ Quiz not verified by green tick after retries.', 'error');
+    return false;
+  } finally {
+    isQuizWorkflowRunning = false;
+  }
 }
 
 const solvedQuizUrls = new Set();
@@ -1914,49 +1908,29 @@ let quizAutoTriggerTimer = null;
 let lastQuizCheckTime = 0;
 
 function checkAndAutoSolveQuiz() {
-  if (isBulkActive || isSolvingQuiz || !autoSolveQuizzes || quizError) return;
-
   const currentCleanUrl = window.location.href.split('?')[0].split('#')[0];
-  if (solvedQuizUrls.has(currentCleanUrl)) {
-    return;
-  }
-
+  if (quizErrorUrl && quizErrorUrl !== currentCleanUrl) { quizError = null; quizErrorUrl = null; }
+  if (isBulkActive || isSolvingQuiz || isQuizWorkflowRunning || quizAutoPaused || !autoSolveQuizzes || quizError) return;
+  if (!isQuizOnPage()) return;
+  const active = hasActiveQuizQuestion() || hasPendingQuizStart();
+  if (!active && solvedQuizUrls.has(currentCleanUrl)) return;
   const now = Date.now();
-  if (now - lastQuizCheckTime < 2000) return;
+  if (now - lastQuizCheckTime < 2000 || quizAutoTriggerTimer) return;
   lastQuizCheckTime = now;
-
-  if (isQuizOnPage()) {
-    expandAllSections();
-    const syllabus = getCourseSyllabus();
-    const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
-    const quizItem = syllabus.find((l) => {
-      const h = (l.href || '').toLowerCase();
-      return h.includes(currentPath) || currentPath.includes(h);
-    });
-
-    if (quizItem && quizItem.completed) {
-      solvedQuizUrls.add(currentCleanUrl);
-      return;
-    }
-
-    const activeSidebarItem = document.querySelector(
-      'li.classroom-toc-item--selected, li.selected, li.active, [aria-current="page"]'
-    );
-    if (activeSidebarItem && isLessonCompleted(activeSidebarItem)) {
-      solvedQuizUrls.add(currentCleanUrl);
-      return;
-    }
-
-    if (quizAutoTriggerTimer) clearTimeout(quizAutoTriggerTimer);
-    quizAutoTriggerTimer = setTimeout(() => {
-      if (!isSolvingQuiz && !quizError && isQuizOnPage() && autoSolveQuizzes) {
-        log('Uncompleted quiz detected! Auto-solving with Green Tick verification...');
-        solveLinkedInQuizWithGreenTickRetry().then((ok) => {
-          if (ok) solvedQuizUrls.add(currentCleanUrl);
-        });
-      }
-    }, 1500);
+  if (!active) {
+    const quizItem = getCourseSyllabus().find(l => l.href === window.location.pathname);
+    if (quizItem?.completed) { solvedQuizUrls.add(currentCleanUrl); return; }
   }
+  const epoch = quizRunEpoch;
+  quizAutoTriggerTimer = setTimeout(() => {
+    quizAutoTriggerTimer = null;
+    const url = window.location.href.split('?')[0].split('#')[0];
+    if (epoch !== quizRunEpoch || url !== currentCleanUrl || isBulkActive || isSolvingQuiz ||
+        isQuizWorkflowRunning || quizAutoPaused || quizError || !autoSolveQuizzes || !isQuizOnPage()) return;
+    solveLinkedInQuizWithGreenTickRetry().then(ok => {
+      if (ok) solvedQuizUrls.add(currentCleanUrl);
+    });
+  }, 1500);
 }
 
 // ─── Autonomous Bulk Video Completer (Videos Only Mode) ──────────────────────
@@ -2442,6 +2416,13 @@ function navigateToLesson(lesson) {
 
 // ─── Playback Engine & Anti-Freeze ────────────────────────────────────────────
 
+window.addEventListener('message', event => {
+  if (event.source !== window || event.data?.type !== 'LI_BACKGROUND_PLAY_BLOCKED' || !backgroundRun) return;
+  const message = 'Background playback was blocked by the browser. Open the tab and press Play once.';
+  showHUD(message, 'warn');
+  sendProgress({ message });
+});
+
 function syncPlaybackSettings() {
   window.postMessage({ type: 'LI_FORCE_SPEED', speed: currentSpeed, enabled: speedInjectionEnabled }, window.location.origin);
   window.postMessage({ type: 'LI_SET_BACKGROUND_PLAY', enabled: backgroundRun }, window.location.origin);
@@ -2555,10 +2536,8 @@ function startWatchdog() {
   if (watchdogInterval) clearInterval(watchdogInterval);
 
   watchdogInterval = setInterval(() => {
-    // Always try to dismiss surveys when bulk mode is active
-    if (isBulkActive) {
-      dismissSurveyIfPresent();
-    }
+    // Handle player surveys during ordinary autoplay as well as AutoPilot.
+    if (dismissSurveyIfPresent()) return;
 
     if (isBulkActive) {
       if (isRunningAutonomousStep || isNavigatingToLesson || isSolvingQuiz) {
@@ -2576,6 +2555,11 @@ function startWatchdog() {
       if (!videoEl || videoEl.ended || videoEl.paused) {
         runAutonomousStep();
       }
+      return;
+    }
+
+    if (isQuizOnPage()) {
+      checkAndAutoSolveQuiz();
       return;
     }
 
@@ -2690,6 +2674,8 @@ function attachToVideo(video) {
 
 function startObserver() {
   const tryFind = () => {
+    if (dismissSurveyIfPresent()) return;
+    if (!isBulkActive) checkAndAutoSolveQuiz();
     if (videoEl && !videoEl.isConnected) {
       if (_listenerController) _listenerController.abort();
       videoEl = null;
@@ -2712,6 +2698,9 @@ setInterval(() => {
   if (window.location.href !== lastMonitoredUrl) {
     lastMonitoredUrl = window.location.href;
     rememberLearningPath();
+    quizError = null; quizErrorUrl = null; lastQuizCheckTime = 0;
+    if (quizAutoTriggerTimer) clearTimeout(quizAutoTriggerTimer);
+    quizAutoTriggerTimer = null;
     log('SPA Navigation detected:', lastMonitoredUrl);
     isNavigatingToLesson = false;
     if (navWatchdogTimer) {
@@ -2832,6 +2821,8 @@ async function startAllPaths() {
   if (!autoNavigateEnabled) return { success: false, error: 'Enable Auto-navigation before starting the path queue.' };
   if (isBulkActive) return { success: false, error: 'Stop the current run before starting a path queue.' };
   isBulkActive = true;
+  quizAutoPaused = false;
+  quizError = null; quizErrorUrl = null;
   try {
     // Expand the observed library pagination before freezing the queue.
     for (let page = 0; page < 30; page++) {
@@ -2889,7 +2880,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.focusMode) focusMode = message.focusMode;
     if (message.speed) currentSpeed = Math.min(16, Math.max(0.25, parseFloat(message.speed) || currentSpeed));
     isBulkActive = true;
-    quizError = null;
+    quizError = null; quizErrorUrl = null; quizAutoPaused = false;
     rememberLearningPath();
     if (window.location.href.includes('/paths/')) {
       learningPathActive = true;
@@ -2908,11 +2899,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'stopBulkComplete') {
     quizRunEpoch++;
-    autoSolveQuizzes = false;
+    quizAutoPaused = true;
+    if (quizAutoTriggerTimer) clearTimeout(quizAutoTriggerTimer);
+    quizAutoTriggerTimer = null;
     isBulkActive = false;
     learningPathActive = false;
     lastLearningPathUrl = null;
-    chrome.storage.local.set({ bulkActive: false, pathQueueActive: false, autoSolve: false, autoSolveQuizzes: false, learningPathActive: false, lastLearningPathUrl: null, pathExamNotice: null });
+    chrome.storage.local.set({ bulkActive: false, pathQueueActive: false, learningPathActive: false, lastLearningPathUrl: null, pathExamNotice: null });
     if (nonVideoTimer) clearTimeout(nonVideoTimer);
     nonVideoTimer = null;
     if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
@@ -2965,8 +2958,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'solveQuizNow') {
+    quizAutoPaused = false;
+    if (!isQuizOnPage()) { sendResponse({success:false, error:'Open a chapter quiz first.'}); return true; }
     solveLinkedInQuizWithGreenTickRetry().then((res) => {
-      sendResponse({ success: res });
+      sendResponse({ success: res, error: res ? undefined : (quizError || 'Quiz completion could not be verified. Check the quiz and Activity Log.') });
     });
     return true;
   }
@@ -2993,7 +2988,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.action === 'setAutoSolveQuizzes') {
     autoSolveQuizzes = !!message.enabled;
-    chrome.runtime.sendMessage({ action: 'setStorage', data: { autoSolveQuizzes } });
+    chrome.storage.local.set({ autoSolve: autoSolveQuizzes, autoSolveQuizzes });
+    if (autoSolveQuizzes) { quizAutoPaused = false; quizError = null; quizErrorUrl = null; lastQuizCheckTime = 0; checkAndAutoSolveQuiz(); }
     sendResponse({ success: true, autoSolveQuizzes });
     return true;
   }
@@ -3065,4 +3061,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.strictCompletion) strictCompletionEnabled = changes.strictCompletion.newValue !== false;
   if (changes.bulkActive && changes.bulkActive.newValue === false) isBulkActive = false;
   if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay) syncPlaybackSettings();
+  const providerChanged = ['groqApiKey', 'geminiApiKey', 'openRouterApiKey', 'nvidiaApiKey', 'selectedProvider'].some(key => changes[key]);
+  if (providerChanged || ((changes.autoSolve || changes.autoSolveQuizzes) && autoSolveQuizzes)) {
+    quizAutoPaused = false; quizError = null; quizErrorUrl = null; lastQuizCheckTime = 0;
+    checkAndAutoSolveQuiz();
+  }
 });
