@@ -1,6 +1,6 @@
 # LinkedIn Learning AI AutoPilot
 
-A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.7.1**.
+A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.0**.
 
 ## Installation
 
@@ -18,6 +18,16 @@ A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson 
 - **AI providers:** optionally configure Gemini, Groq, OpenRouter, or NVIDIA credentials in the popup. Identical in-flight prompts share a request; different prompts receive independent responses.
 
 Saved settings load before player observation and update across open tabs. The extension preserves real playback rates, including speeds below 1×, and attaches to replacement videos during page navigation.
+
+## Running learning paths
+
+Open **LinkedIn Learning → My Content → In progress** (or Recommended / Assigned) and click **Run All Paths in My Content** in the popup. It expands the list's **Show more** buttons, collects path headings, and saves a queue for the paths in that list. Switch library sections and run again to process paths in another section. Enable Auto-navigation first.
+
+The queue uses pending-only mode. It opens each path's unfinished items in order, preserves the path and organization URL context, and returns to the overview after each course or standalone video. Standalone items play only their linked video. A path advances only after all its item cards show LinkedIn's explicit **Completed** status. The queue persists across page loads; Stop cancels it and pending quiz actions.
+
+For quizzes, enable AI assistance and configure a provider key. The solver reads the active chapter question, validates exact option text / zero-based indices, clicks each native input once, verifies selection, and submits only through an enabled button. Missing keys, API failures, invalid answers, or failed selection pause the run. A generic results heading or another completed quiz cannot verify the current quiz. AI correctness remains dependent on the provider.
+
+Summative final exams require manual completion. If one remains after course lessons, the run pauses and tells you to complete it before restarting. The queue covers paths listed in the selected library section, not every path in LinkedIn's catalog.
 
 ## Privacy and limitations
 
@@ -39,4 +49,4 @@ node --check background.js
 node --check popup.js
 ```
 
-The regression tests use mocked browser and extension APIs. They cover saved preferences, live toggles, fractional playback rates, pause/mute preservation, delayed navigation after Stop, and concurrent AI request isolation. Signed-in LinkedIn playback and live provider calls require a separate browser check.
+The regression tests use mocked browser and extension APIs. They cover settings, playback preferences, Stop cancellation, AI request isolation, active-question parsing, invalid-answer rejection, single-click input selection, path card extraction, context preservation, and queue progress. The current path, sidebar, standalone-player, library-pagination, and chapter-quiz markup were inspected in signed-in LinkedIn Learning. Full path completion and live AI submissions have not been tested end to end.

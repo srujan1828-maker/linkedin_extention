@@ -649,6 +649,20 @@ ${escapeHtml(data.rawResponse || '')}
 
   // ─── Action Buttons: AutoPilot, Solve Quiz, Stop ────────────────────────────
 
+  document.getElementById('btn-all-paths')?.addEventListener('click', async () => {
+    updateProgressBar(0, 'Discovering learning paths...');
+    const res = await sendToContent({ action: 'startAllPaths' });
+    if (res?.success) updateProgressBar(0, `Queued ${res.totalPaths} learning paths.`);
+    else {
+      hideProgressBar();
+      const data = await chrome.storage.local.get(['activityLogs']);
+      const logs = data.activityLogs || [];
+      logs.unshift({ time: new Date().toLocaleTimeString(), type: 'error', message: res?.error || 'Open your LinkedIn Learning My Content list and refresh the tab.' });
+      await chrome.storage.local.set({ activityLogs: logs.slice(0, 80) });
+      renderLogs(logs);
+    }
+  });
+
   if (btnBulkComplete) {
     btnBulkComplete.addEventListener('click', async () => {
       const focusMode = focusModeSelect?.value || 'pending_only';
@@ -736,3 +750,4 @@ ${escapeHtml(data.rawResponse || '')}
     });
   }
 });
+
