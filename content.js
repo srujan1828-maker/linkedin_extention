@@ -107,12 +107,17 @@ function getCourseSlug() {
 
 function isLanguageElement(el) {
   if (!el) return false;
+  // If it's inside the quiz challenge, question, assessment, or main classroom content area, it is NOT a language selector!
+  if (el.closest('.quiz-challenge, [class*="quiz-challenge"], [class*="assessment-challenge"], main, [role="main"], .classroom-body, [class*="classroom-layout__main"]')) {
+    if (!el.closest('.global-footer, .global-footer-compact')) {
+      return false;
+    }
+  }
   // Specific LinkedIn global language dropdowns and controls
-  if (el.closest('.language-selector, #language-selector, [data-test-language-selector], [data-control-name*="language" i]')) return true;
-  if (el.closest('[class*="language" i], [id*="language" i], [aria-label*="language" i], [aria-label*="bahasa" i]')) return true;
-  // Global footer language selector container only (do not block assessment or quiz footers)
-  if (el.closest('.global-footer-compact, .global-footer__language') || (el.closest('.global-footer') && !el.closest('main, [role="main"], .quiz-challenge, .classroom-body, [class*="assessment"]'))) return true;
-  // Global LinkedIn primary navigation bar (do not block classroom nav or quiz headers)
+  if (el.closest('.language-selector, #language-selector, [data-test-language-selector], [data-control-name*="language" i], [data-control-name*="locale" i]')) return true;
+  // Global footer language selector container only
+  if (el.closest('.global-footer-compact, .global-footer__language') || (el.closest('.global-footer') && !el.closest('.classroom-nav, .classroom-layout'))) return true;
+  // Global LinkedIn primary navigation bar (outside classroom)
   if (el.closest('.global-nav, nav[aria-label="Primary"]') && !el.closest('.classroom-nav, .classroom-layout')) return true;
   return false;
 }
@@ -132,10 +137,11 @@ function expandAllSections() {
 
 function isLessonCompleted(container) {
   if (!container) return false;
+  const fullRow = container.closest('li') || container;
 
   // Ignore bookmark buttons or actions
   const bookmarkButtons = Array.from(
-    container.querySelectorAll('button[aria-label*="bookmark" i], .classroom-toc-item__bookmark, [data-test-icon*="bookmark"]')
+    fullRow.querySelectorAll('button[aria-label*="bookmark" i], .classroom-toc-item__bookmark, [data-test-icon*="bookmark"]')
   );
   const isInsideBookmark = (el) => {
     for (const b of bookmarkButtons) {
@@ -145,7 +151,7 @@ function isLessonCompleted(container) {
   };
 
   // 1. Text checks (Multilingual: EN, ID, ES, FR, DE)
-  const text = (container.innerText || '').toLowerCase();
+  const text = ((container.innerText || '') + ' ' + (fullRow.innerText || '')).toLowerCase();
   const completionRegex = /\b(?:completed|watched|passed|quiz passed|selesai|lulus|ditonton|completado|visto|aprobado|terminé|réussi|abgeschlossen|bestanden)\b/i;
   const negativeRegex = /\b(?:not completed|unwatched|not started|belum selesai|belum dimulai|no completado|non terminé)\b/i;
 
@@ -154,9 +160,10 @@ function isLessonCompleted(container) {
   }
 
   // 2. ARIA labels on container and all child elements (excluding bookmarks)
-  const ariaEls = Array.from(container.querySelectorAll('[aria-label]')).filter((el) => !isInsideBookmark(el));
+  const ariaEls = Array.from(fullRow.querySelectorAll('[aria-label]')).filter((el) => !isInsideBookmark(el));
   const allAria = [
     container.getAttribute('aria-label') || '',
+    fullRow.getAttribute('aria-label') || '',
     ...ariaEls.map((el) => el.getAttribute('aria-label') || '')
   ].join(' ').toLowerCase();
 
@@ -165,14 +172,14 @@ function isLessonCompleted(container) {
   }
 
   // 3. Screen-reader hidden elements (excluding bookmarks)
-  const hiddenElements = Array.from(container.querySelectorAll('.visually-hidden, [class*="hidden"], [class*="sr-only"]')).filter((el) => !isInsideBookmark(el));
+  const hiddenElements = Array.from(fullRow.querySelectorAll('.visually-hidden, [class*="hidden"], [class*="sr-only"]')).filter((el) => !isInsideBookmark(el));
   for (const h of hiddenElements) {
     const ht = (h.innerText || '').toLowerCase();
     if (completionRegex.test(ht) && !negativeRegex.test(ht)) return true;
   }
 
   // 4. Dedicated LinkedIn icon components (excluding bookmarks)
-  const iconElements = Array.from(container.querySelectorAll('li-icon, [data-test-icon], [data-icon]')).filter((el) => !isInsideBookmark(el));
+  const iconElements = Array.from(fullRow.querySelectorAll('li-icon, [data-test-icon], [data-icon]')).filter((el) => !isInsideBookmark(el));
   for (const ic of iconElements) {
     const iconType = (
       ic.getAttribute('type') ||
@@ -188,7 +195,7 @@ function isLessonCompleted(container) {
   }
 
   // 5. SVG checkmarks & green color styles (excluding bookmarks)
-  const svgs = Array.from(container.querySelectorAll('svg')).filter((el) => !isInsideBookmark(el));
+  const svgs = Array.from(fullRow.querySelectorAll('svg')).filter((el) => !isInsideBookmark(el));
   for (const svg of svgs) {
     const iconName = (
       svg.getAttribute('data-test-icon') ||
@@ -216,7 +223,7 @@ function isLessonCompleted(container) {
       const cssStroke = (style.stroke || '').toLowerCase();
 
       const isGreen = (val) =>
-        /green|#10b981|#059669|#12884a|#00732f|#057642|#107c41|rgb\(1[0-9],|rgb\(0,\s*1[0-9]|rgb\(5,\s*118|rgb\(16,\s*124|rgb\(18,\s*136/i.test(val);
+        /green|#10b981|#059669|#12884a|#00732f|#057642|#107c41|signal-positive|rgb\(1[0-9],|rgb\(0,\s*1[0-9]|rgb\(5,\s*118|rgb\(16,\s*124|rgb\(18,\s*136/i.test(val);
 
       if (isGreen(stroke) || isGreen(fill) || isGreen(color) || isGreen(cssFill) || isGreen(cssStroke)) {
         return true;
@@ -224,24 +231,16 @@ function isLessonCompleted(container) {
     } catch (e) {}
   }
 
-  // 6. CSS classes
-  const cls = ((container.className || '') + ' ' + ((container.closest('li') || {}).className || '')).toLowerCase();
+  // 6. CSS classes & attributes
+  const cls = ((container.className || '') + ' ' + (fullRow.className || '')).toLowerCase();
   if (/classroom-toc-item--completed|has-passed|status--completed/i.test(cls)) {
+    return true;
+  }
+  if (fullRow.getAttribute('data-status') === 'completed' || fullRow.getAttribute('data-test-item-completed') === 'true') {
     return true;
   }
 
   return false;
-}
-
-function findButtonByText(pattern, includeDisabled = false) {
-  const candidates = Array.from(document.querySelectorAll(
-    'button, [role="button"], input[type="button"], input[type="submit"], a, [class*="btn"], [class*="button"]'
-  ));
-  return candidates.find((el) => {
-    if (!includeDisabled && !isElementClickable(el)) return false;
-    const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
-    return pattern.test(text);
-  });
 }
 
 function getCourseSyllabus() {
@@ -250,9 +249,19 @@ function getCourseSyllabus() {
 
   expandAllSections();
 
-  const links = Array.from(document.querySelectorAll(
-    `a[href*="/learning/${courseSlug}/"], a[href*="/learning-career-hub/${courseSlug}/"], a[href*="/career-hub/${courseSlug}/"]`
-  ));
+  const sidebar = document.querySelector('#course-contents, [class*="classroom-toc"], ul.classroom-toc');
+  let links = [];
+  if (sidebar) {
+    links = Array.from(sidebar.querySelectorAll('a')).filter((a) => {
+      const h = a.getAttribute('href') || a.href || '';
+      return h && !h.startsWith('#') && !h.includes('/search') && !a.closest('header, nav[aria-label="Primary" i]');
+    });
+  }
+  if (links.length === 0) {
+    links = Array.from(document.querySelectorAll(
+      `a[href*="/learning/${courseSlug}/"], a[href*="/learning-career-hub/${courseSlug}/"], a[href*="/career-hub/${courseSlug}/"]`
+    ));
+  }
   const seen = new Set();
   const lessons = [];
 
@@ -264,11 +273,19 @@ function getCourseSyllabus() {
       continue;
     }
 
+    const title = (a.innerText || '').trim().replace(/\s+/g, ' ') || 'Lesson';
+    if (
+      /back to|kembali ke|←|↩/i.test(title) ||
+      /\b(?:path|jalur)\b/i.test(title) ||
+      /\b(?:certificate|certificates|sertifikat|cert|exercise|overview|transcript|notebook|review|share)\b/i.test(cleanHref + ' ' + title)
+    ) {
+      continue;
+    }
+
     if (!seen.has(cleanHref)) {
       seen.add(cleanHref);
       const rowContainer = a.closest('li') || a.parentElement || a;
       const completed = isLessonCompleted(rowContainer);
-      const title = (a.innerText || '').trim().replace(/\s+/g, ' ') || 'Lesson';
 
       const rowText = (rowContainer.innerText || '').toLowerCase();
       const hasVideoDuration = /\b\d+\s*(?:mnt|min|m|sec|dtk|s)\b|\bvideo\b/i.test(rowText);
@@ -301,6 +318,30 @@ function getCourseSyllabus() {
  * Detects if the current page is a Learning Path overview page
  * (list of courses/videos in a path, NOT inside a specific course player).
  */
+function pauseLearningPathVideos() {
+  const pathVideos = document.querySelectorAll('video');
+  if (pathVideos.length > 0) {
+    pathVideos.forEach((v) => {
+      try {
+        if (!v.paused) v.pause();
+        v.muted = true;
+        v.removeAttribute('autoplay');
+        if (!v._pathPauseBound) {
+          v._pathPauseBound = true;
+          v.addEventListener('play', () => {
+            if (isLearningPathPage()) {
+              try {
+                v.pause();
+                v.muted = true;
+              } catch (e) {}
+            }
+          });
+        }
+      } catch (e) {}
+    });
+  }
+}
+
 function isLearningPathPage() {
   const path = window.location.pathname.toLowerCase();
   const href = window.location.href.toLowerCase();
@@ -309,56 +350,99 @@ function isLearningPathPage() {
   const isPathUrl =
     path.includes('/paths/') ||
     path.includes('/learning-paths/') ||
-    path.includes('/learning-career-hub/') ||
-    path.includes('/career-hub/') ||
     href.includes('/paths/') ||
     href.includes('/learning-paths/');
 
   if (!isPathUrl) return false;
 
-  // If there's an active video player, we're inside a course, not on path overview
-  if (document.querySelector('video')) return false;
-
   // If there's a course syllabus sidebar, we're inside a course
   if (document.querySelector('#course-contents, [class*="classroom-toc"], ul.classroom-toc')) return false;
 
-  // Check that there are course/video cards on the page
-  const items = getLearningPathItems();
-  return items.length > 0;
+  // On paths pages, pause any preview/hero videos immediately
+  pauseLearningPathVideos();
+
+  return true;
+}
+
+/**
+ * Detects if the current page is an off-track site navigation route
+ * (e.g. Home, Browse, Certifications, Search) that needs escape rescue.
+ */
+function isGlobalNavPage() {
+  const path = window.location.pathname.toLowerCase();
+  const href = window.location.href.toLowerCase();
+
+  // If on a path overview page or inside an active course player, it's NOT an off-track global nav page
+  if (path.includes('/paths/') || href.includes('/paths/') || path.includes('/learning-paths/') || href.includes('/learning-paths/')) return false;
+  if (document.querySelector('#course-contents, [class*="classroom-toc"], ul.classroom-toc')) return false;
+
+  // Known off-track routes that the extension should escape from back to the Learning Path
+  if (
+    path.includes('/certificates') ||
+    path.includes('/certifications') ||
+    path.includes('/learning-career-hub/home') ||
+    path.includes('/career-hub/home') ||
+    path.includes('/learning/browse') ||
+    path.includes('/learning-career-hub/browse') ||
+    path.includes('/career-hub/browse') ||
+    path.includes('/learning-career-hub/certifications') ||
+    path.includes('/learning/search') ||
+    path.includes('/learning-career-hub/search') ||
+    path.includes('/learning/me') ||
+    path.includes('/learning-career-hub/me') ||
+    path.endsWith('/career-hub') ||
+    path.endsWith('/career-hub/') ||
+    path.endsWith('/learning-career-hub') ||
+    path.endsWith('/learning-career-hub/')
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
  * Checks if a Learning Path item (course/video card) is completed.
- * Looks for completion badges, green progress bars, checkmarks, and ARIA labels.
+ * Strict verification: Must explicitly state "Completed" (e.g. "Completed 6/4/2026")
+ * or have an explicit checkmark badge. Does NOT treat unfinished progress bars as completed.
  */
 function isPathItemCompleted(container) {
   if (!container) return false;
 
-  // 1. Green progress bar at 100% or with green styling
-  const progressBars = container.querySelectorAll('[class*="progress"], [role="progressbar"]');
-  for (const bar of progressBars) {
-    const style = window.getComputedStyle(bar);
-    const bgColor = (style.backgroundColor || '').toLowerCase();
-    const width = style.width;
-    // Green progress bar means completed
-    if (/green|#10b981|#059669|#12884a|#00732f|#057642|rgb\(16,\s*185|rgb\(5,\s*150/i.test(bgColor)) {
-      return true;
-    }
+  const cardText = (container.innerText || '').toLowerCase();
+  const cardAria = Array.from(container.querySelectorAll('[aria-label]'))
+    .map((el) => (el.getAttribute('aria-label') || '').toLowerCase())
+    .join(' ');
+  const combined = cardText + ' ' + cardAria;
+
+  // Negative checks: if it says "left", "remaining", or "incomplete", it's NOT completed
+  if (/\b(?:\d+m?\s*\d*s?\s*left|\d+\s*left|remaining|incomplete|belum selesai|sisa)\b/i.test(combined)) {
+    return false;
   }
 
-  // 2. Check for completion text in ARIA labels and visible text
-  const allText = (container.innerText || '').toLowerCase();
-  const allAria = Array.from(container.querySelectorAll('[aria-label]'))
-    .map(el => (el.getAttribute('aria-label') || '').toLowerCase())
-    .join(' ');
-  const combined = allText + ' ' + allAria;
+  // 1. Explicit "Completed" text (e.g. "Completed 6/4/2026", "Completed", "Selesai")
+  const completionRegex = /\b(?:completed\b(?:\s+\d+[\/\-]\d+[\/\-]\d+)?|selesai\b|completado\b|terminé\b|abgeschlossen\b)/i;
+  const negativeRegex = /\b(?:not completed|belum selesai|no completado|non terminé)\b/i;
 
-  if (/\b(?:completed|complete|passed|selesai|lulus|completado|terminé|abgeschlossen)\b/i.test(combined) &&
-      !/\b(?:not completed|incomplete|belum selesai|no completado|non terminé)\b/i.test(combined)) {
+  if (completionRegex.test(combined) && !negativeRegex.test(combined)) {
     return true;
   }
 
-  // 3. SVG checkmark badges (white check in colored circle overlay)
+  // If it has duration / progress text (e.g. "41m 55s", "54m 4s left", "1h 3m") and NO "completed" text, it is NOT completed
+  if (!completionRegex.test(combined) && /\b\d+\s*(?:m|min|mnt|h|hr|j|s|sec|dtk)\b/i.test(cardText)) {
+    return false;
+  }
+
+  // 2. SVG checkmark icon / badge explicitly inside a completion badge or status tag
+  const checkBadges = container.querySelectorAll(
+    '[class*="completed"], [class*="status--completed"], [class*="badge--completed"], li-icon[type*="check"], [data-test-icon*="check"]'
+  );
+  for (const b of checkBadges) {
+    const bText = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
+    if (!/bookmark/i.test(bText)) return true;
+  }
+
+  // 3. SVG with checkmark that is NOT a bookmark or bullet
   const svgs = container.querySelectorAll('svg');
   for (const svg of svgs) {
     const iconName = (
@@ -368,49 +452,31 @@ function isPathItemCompleted(container) {
       svg.getAttribute('type') ||
       ''
     ).toLowerCase();
+    if (iconName.includes('bookmark') || iconName.includes('bullet') || iconName.includes('circle')) continue;
     if (iconName.includes('check') || iconName.includes('completed') || iconName.includes('success')) {
       return true;
     }
-    // Check <use> tags
-    const useTags = svg.querySelectorAll('use');
-    for (const u of useTags) {
-      const href = (u.getAttribute('href') || u.getAttribute('xlink:href') || '').toLowerCase();
-      if (href.includes('check') || href.includes('completed')) return true;
-    }
+
+    try {
+      const stroke = (svg.getAttribute('stroke') || '').toLowerCase();
+      const fill = (svg.getAttribute('fill') || '').toLowerCase();
+      const style = window.getComputedStyle(svg);
+      const color = (style.color || '').toLowerCase();
+      const cssFill = (style.fill || '').toLowerCase();
+      const cssStroke = (style.stroke || '').toLowerCase();
+
+      const isGreen = (val) =>
+        /green|#10b981|#059669|#12884a|#00732f|#057642|#107c41|signal-positive|rgb\(1[0-9],|rgb\(0,\s*1[0-9]|rgb\(5,\s*118|rgb\(16,\s*124|rgb\(18,\s*136/i.test(val);
+
+      if (isGreen(stroke) || isGreen(fill) || isGreen(color) || isGreen(cssFill) || isGreen(cssStroke)) {
+        return true;
+      }
+    } catch (e) {}
   }
 
-  // 4. li-icon elements with check type
-  const icons = container.querySelectorAll('li-icon, [data-test-icon], [data-icon]');
-  for (const ic of icons) {
-    const iconType = (
-      ic.getAttribute('type') ||
-      ic.getAttribute('data-test-icon') ||
-      ic.getAttribute('data-icon') ||
-      ''
-    ).toLowerCase();
-    if (iconType.includes('check') || iconType.includes('completed')) return true;
-  }
-
-  // 5. CSS classes indicating completion
-  const cls = (container.className || '').toLowerCase();
-  if (/completed|complete|passed|finished/i.test(cls)) return true;
-
-  // 6. Check for a visible duration text with green/completed style
-  // On LinkedIn path pages, completed items show time with a green bar underneath
-  const timeElements = container.querySelectorAll('span, div, p');
-  for (const el of timeElements) {
-    const text = (el.innerText || '').trim();
-    if (/^\d+h?\s*\d*m?\s*\d*s?$/i.test(text)) {
-      // This looks like a duration, check its parent for green styling
-      try {
-        const parent = el.parentElement;
-        if (parent) {
-          const pStyle = window.getComputedStyle(parent);
-          const pBg = (pStyle.backgroundColor || '').toLowerCase();
-          if (/green|#10b981|#059669|#12884a|#057642/i.test(pBg)) return true;
-        }
-      } catch (e) {}
-    }
+  // 4. Delegate to general lesson completed checker
+  if (isLessonCompleted(container)) {
+    return true;
   }
 
   return false;
@@ -423,52 +489,162 @@ function isPathItemCompleted(container) {
 function getLearningPathItems() {
   const items = [];
   const seen = new Set();
+  const currentPathClean = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
 
-  // Strategy 1: Find all course/video links on path pages
-  const links = Array.from(document.querySelectorAll(
+  // Strict list of site navigation / sidebar labels to IGNORE
+  const siteNavFilter = /^(?:home|browse|certif.*|career paths?|my career plan|my content|ai coaching|ai role play|hands-on tech|featured.*|human skills|data analysis|help|save|share|add to.*|beranda|resume|start)$/i;
+
+  // Specific blacklist for navigation routes (not courses)
+  const navBlacklist = /\/(?:home|browse|certif[a-z]*|career-paths|my-career-plan|my-content|paths|learning-paths|search|me|saved|topics|instructors|providers|organizations|help|feedback)\b/i;
+
+  // Find all candidate course links across the document
+  const rawLinks = Array.from(document.querySelectorAll(
     'a[href*="/learning/"], a[href*="/learning-career-hub/"], a[href*="/career-hub/"]'
   ));
 
+  const links = rawLinks.filter((a) => {
+    // 1. Reject any link inside site navigation, left-rail sidebar, header, footer
+    if (a.closest('nav, aside, header, footer, [role="navigation"], .global-nav, .side-nav, .nav-rail, .left-rail, [data-control-name*="nav"]')) {
+      return false;
+    }
+
+    const rawHref = (a.getAttribute('href') || a.href || '').trim();
+    const cleanHref = rawHref.split('?')[0].split('#')[0].toLowerCase();
+
+    // 2. Must be on /learning/, /learning-career-hub/, or /career-hub/
+    const isLearningUrl = cleanHref.includes('/learning/') || cleanHref.includes('/learning-career-hub/') || cleanHref.includes('/career-hub/');
+    if (!isLearningUrl) return false;
+
+    // 3. Reject site-wide navigation routes
+    if (
+      cleanHref.endsWith('/learning') ||
+      cleanHref.endsWith('/learning/') ||
+      cleanHref.endsWith('/learning-career-hub') ||
+      cleanHref.endsWith('/learning-career-hub/') ||
+      cleanHref.endsWith('/career-hub') ||
+      cleanHref.endsWith('/career-hub/') ||
+      navBlacklist.test(cleanHref)
+    ) {
+      return false;
+    }
+
+    // 4. Must not be the current path URL itself
+    if (cleanHref === currentPathClean) return false;
+
+    // 5. Check link text against navigation items
+    const text = (a.innerText || '').trim();
+    if (text.length > 0 && siteNavFilter.test(text)) return false;
+
+    return true;
+  });
+
   for (const a of links) {
-    const href = (a.getAttribute('href') || a.href || '').split('?')[0].split('#')[0];
+    const rawHref = (a.getAttribute('href') || a.href || '').trim();
+    const hrefClean = rawHref.split('?')[0].split('#')[0].toLowerCase();
 
-    // Skip if it's a path URL itself or a generic link
-    if (!href || href.endsWith('/learning/') || href.endsWith('/learning-career-hub/')) continue;
-    if (/\/paths\/|\/learning-paths\/|\/search/i.test(href)) continue;
+    if (seen.has(hrefClean)) continue;
 
-    // Skip nav/footer links
-    if (a.closest('.global-nav, .global-footer, nav[aria-label="Primary"], footer')) continue;
+    // Find the course card container (search upwards from link)
+    let card = a.closest('li, article, [class*="learning-path-item"], [class*="learning-path__item"], [class*="path-course"], [class*="entity-lockup"], [class*="card"]');
+    if (!card) {
+      let curr = a.parentElement;
+      for (let depth = 0; depth < 4 && curr && curr !== document.body && curr.tagName !== 'SECTION' && curr.tagName !== 'MAIN'; depth++) {
+        if (curr.querySelectorAll('a[href*="/learning"], a[href*="/career-hub"]').length <= 3) {
+          card = curr;
+        }
+        curr = curr.parentElement;
+      }
+    }
+    if (!card) card = a.parentElement || a;
 
-    // Deduplicate
-    if (seen.has(href)) continue;
-    seen.add(href);
+    const cardText = (card.innerText || '').toLowerCase();
+    // Exclude if card is solely a certificate or credential
+    if (/certif|sertifikat|\bcerts?\b|credential|badge/i.test(cardText) && !/\b(?:course|video|kursus)\b/i.test(cardText)) {
+      continue;
+    }
 
-    // Find the card/container for this link
-    const card = a.closest('article, [class*="card"], [class*="item"], li, section, div[class*="path"]') || a.parentElement;
+    // Extract title: prefer link text, then card heading, then URL slug
+    let title = (a.innerText || '').trim().replace(/\s+/g, ' ');
+    title = title.replace(/^(?:course|kursus|cours|curso)\s+/i, '').trim();
 
-    // Get the title
-    const titleEl = card.querySelector('h2, h3, h4, [class*="title"], [class*="name"]') || a;
-    const title = (titleEl.innerText || a.innerText || '').trim().replace(/\s+/g, ' ') || 'Course';
+    if (title.length < 3 || /^(?:view|watch|open|play|details?)$/i.test(title)) {
+      const heading = card.querySelector('h3, h4, h2, [class*="title"], [class*="headline"], strong');
+      if (heading) {
+        const ht = (heading.innerText || '').trim().replace(/\s+/g, ' ');
+        if (ht.length >= 3 && !siteNavFilter.test(ht) && !/^unit\s*\d+/i.test(ht) && !/content in this/i.test(ht)) {
+          title = ht.replace(/^(?:course|kursus|cours|curso)\s+/i, '').trim();
+        }
+      }
+    }
 
-    // Skip if title is too short/generic (navigation elements)
+    if (title.length < 3 || siteNavFilter.test(title) || /^unit\s*\d+/i.test(title)) {
+      const slug = hrefClean.split('/').filter(Boolean).pop() || '';
+      title = slug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+    }
+
     if (title.length < 3) continue;
 
-    // Determine type from context
-    const cardText = (card.innerText || '').toLowerCase();
-    const type = /\bvideo\b/i.test(cardText) && !/\bcourse\b/i.test(cardText) ? 'video' : 'course';
+    seen.add(hrefClean);
 
-    // Check completion
+    const type = /\bvideo\b/i.test(cardText) && !/\bcourse\b/i.test(cardText) ? 'video' : 'course';
     const completed = isPathItemCompleted(card);
 
     items.push({
       element: a,
       card,
-      href,
-      fullHref: a.href || href,
+      href: hrefClean,
+      fullHref: a.href || rawHref,
       title,
       completed,
       type
     });
+  }
+
+  // Strategy 2: If no items found, inspect card elements directly in DOM
+  if (items.length === 0) {
+    const cards = Array.from(document.querySelectorAll(
+      'li[class*="learning-path"], li[class*="item"], [data-test-learning-path-item], [data-test-path-item], [class*="path-course"], article, [class*="entity-lockup"]'
+    )).filter((c) => {
+      if (c.closest('nav, aside, header, footer, [role="navigation"], .global-nav, .side-nav, .nav-rail, .left-rail')) return false;
+      const t = (c.innerText || '').trim();
+      return t.length > 10 && /\b(?:course|video|kursus)\b/i.test(t);
+    });
+
+    for (const card of cards) {
+      const a = card.querySelector('a[href*="/learning/"], a[href*="/learning-career-hub/"], a[href*="/career-hub/"]');
+      if (!a) continue;
+      const rawHref = (a.getAttribute('href') || a.href || '').trim();
+      const hrefClean = rawHref.split('?')[0].split('#')[0].toLowerCase();
+      if (!hrefClean || seen.has(hrefClean) || hrefClean === currentPathClean) continue;
+      if (navBlacklist.test(hrefClean)) continue;
+
+      let title = (a.innerText || '').trim().replace(/\s+/g, ' ');
+      title = title.replace(/^(?:course|kursus|cours|curso)\s+/i, '').trim();
+      if (title.length < 3 || siteNavFilter.test(title)) {
+        const titleEl = card.querySelector('h2, h3, h4, [class*="title"], [class*="headline"]');
+        if (titleEl) {
+          title = (titleEl.innerText || '').trim().replace(/\s+/g, ' ');
+          title = title.replace(/^(?:course|kursus|cours|curso)\s+/i, '').trim();
+        }
+      }
+      if (title.length < 3 || siteNavFilter.test(title)) {
+        const slug = hrefClean.split('/').filter(Boolean).pop() || '';
+        title = slug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+      }
+      if (title.length < 3) continue;
+
+      seen.add(hrefClean);
+      const completed = isPathItemCompleted(card);
+      items.push({
+        element: a,
+        card,
+        href: hrefClean,
+        fullHref: a.href || rawHref,
+        title,
+        completed,
+        type: /\bvideo\b/i.test(card.innerText) && !/\bcourse\b/i.test(card.innerText) ? 'video' : 'course'
+      });
+    }
   }
 
   return items;
@@ -484,23 +660,34 @@ function findBackToLearningPathButton() {
     if (isLanguageElement(el)) continue;
     const text = (el.innerText || el.textContent || '').trim().toLowerCase();
     const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+    const href = (el.getAttribute('href') || el.href || '').toLowerCase();
     const combined = text + ' ' + aria;
 
-    if (/back to learning path|back to path|kembali ke jalur pembelajaran|kembali ke path/i.test(combined)) {
+    if (
+      /back to learning path|back to path|kembali ke jalur pembelajaran|kembali ke path/i.test(combined) ||
+      (href.includes('/learning/paths/') && (/back|kembali|←|↩/i.test(combined) || !text))
+    ) {
       if (isElementClickable(el)) return el;
     }
   }
 
   // Check sidebar top area for path return link
-  const sidebar = document.querySelector('#course-contents, [class*="classroom-toc"]');
+  const sidebar = document.querySelector('#course-contents, [class*="classroom-toc"], aside, nav');
   if (sidebar) {
-    const topLinks = sidebar.querySelectorAll('a');
+    const topLinks = sidebar.querySelectorAll('a[href*="/learning/paths/"], a');
     for (const link of topLinks) {
+      const href = (link.getAttribute('href') || link.href || '').toLowerCase();
       const text = (link.innerText || '').trim().toLowerCase();
-      if (/back to|kembali ke|← |↩/i.test(text) && /path|jalur/i.test(text)) {
+      if (href.includes('/learning/paths/') || (/back to|kembali ke|←|↩/i.test(text) && /path|jalur/i.test(text))) {
         if (isElementClickable(link)) return link;
       }
     }
+  }
+
+  // Check for ANY link to /learning/paths/ anywhere in header/nav/main
+  const anyPathLink = document.querySelector('a[href*="/learning/paths/"], a[href*="/paths/"], a[href*="/learning-career-hub/paths/"]');
+  if (anyPathLink && isElementClickable(anyPathLink)) {
+    return anyPathLink;
   }
 
   return null;
@@ -512,10 +699,30 @@ function findBackToLearningPathButton() {
  * Finds the first uncompleted course and clicks into it.
  */
 async function handleLearningPathStep() {
-  const items = getLearningPathItems();
+  pauseLearningPathVideos();
+
+  let items = getLearningPathItems();
   if (items.length === 0) {
-    log('Learning Path: No items found on page. Waiting...');
-    showHUD('🔍 Scanning Learning Path...', 'info');
+    for (let retry = 0; retry < 6; retry++) {
+      await new Promise((r) => setTimeout(r, 600));
+      pauseLearningPathVideos();
+      items = getLearningPathItems();
+      if (items.length > 0) break;
+    }
+  }
+
+  if (items.length === 0) {
+    // Check if there is an explicit Resume or Start button on the page
+    const resumeBtn = findButtonByText(/^(?:resume|start|continue|mulai|lanjutkan)(?:\s+(?:learning path|path|jalur))?$/i);
+    if (resumeBtn && isElementClickable(resumeBtn)) {
+      log('Learning Path: Found Resume/Start button, clicking to continue course:', resumeBtn.innerText);
+      showHUD(`▶ Clicking "${resumeBtn.innerText}"...`, 'info');
+      clickElement(resumeBtn);
+      return;
+    }
+
+    log('Learning Path: No uncompleted courses found on page. Waiting for DOM...');
+    showHUD('🔍 Scanning Learning Path courses...', 'info');
     setTimeout(runAutonomousStep, 2000);
     return;
   }
@@ -615,24 +822,68 @@ async function handleLearningPathStep() {
  */
 async function returnToLearningPath() {
   const stored = await chrome.storage.local.get(['learningPathActive', 'lastLearningPathUrl']);
-  if (!stored.learningPathActive || !stored.lastLearningPathUrl) return false;
 
-  log('Course completed! Returning to Learning Path...');
-  showHUD('🎉 Course completed! Returning to Learning Path...', 'success');
-  await addLog('🎉 Course completed! Returning to Learning Path...', 'success');
-
-  // Try to click the "Back to Learning Path" button first
+  // 1. Try to click the "Back to Learning Path" button/link first
   const backBtn = findBackToLearningPathButton();
   if (backBtn && isElementClickable(backBtn)) {
-    log('Clicking "Back to Learning Path" button:', backBtn.innerText);
+    log('Clicking "Back to Learning Path" button/link:', backBtn.innerText || backBtn.href);
+    showHUD('🎉 Course completed! Returning to Learning Path...', 'success');
+    await addLog('🎉 Course completed! Returning to Learning Path...', 'success');
+
+    const pathHref = backBtn.getAttribute('href') || backBtn.href || stored.lastLearningPathUrl;
+    if (pathHref && pathHref.includes('/learning/paths/')) {
+      await chrome.storage.local.set({
+        learningPathActive: true,
+        lastLearningPathUrl: pathHref
+      });
+    }
+
     clickElement(backBtn);
-    await new Promise(r => setTimeout(r, 2500));
-  } else {
-    // Fall back to saved URL
-    log('No "Back to Learning Path" button found. Navigating to saved URL:', stored.lastLearningPathUrl);
-    window.location.href = stored.lastLearningPathUrl;
+    await new Promise((r) => setTimeout(r, 2500));
+    return true;
   }
 
+  // 2. Fall back to saved URL
+  if (stored.lastLearningPathUrl) {
+    log('Navigating to saved Learning Path URL:', stored.lastLearningPathUrl);
+    showHUD('🎉 Course completed! Returning to Learning Path...', 'success');
+    await addLog('🎉 Course completed! Returning to Learning Path...', 'success');
+    window.location.href = stored.lastLearningPathUrl;
+    return true;
+  }
+
+  // 3. Fall back: check if document has ANY link to /learning/paths/
+  const anyPathLink = document.querySelector('a[href*="/learning/paths/"], a[href*="/paths/"]');
+  if (anyPathLink && anyPathLink.href) {
+    log('Found Learning Path link in DOM, navigating:', anyPathLink.href);
+    showHUD('🎉 Returning to Learning Path...', 'success');
+    await chrome.storage.local.set({
+      learningPathActive: true,
+      lastLearningPathUrl: anyPathLink.href
+    });
+    window.location.href = anyPathLink.href;
+    return true;
+  }
+
+  // 4. Fall back: check contextUrn in URL parameters
+  const urlParams = new URLSearchParams(window.location.search);
+  const contextUrn = urlParams.get('contextUrn');
+  if (contextUrn && contextUrn.includes('LearningPath')) {
+    log('Found contextUrn with LearningPath. Navigating back in history...');
+    showHUD('🎉 Course completed! Navigating back to path...', 'success');
+    window.history.back();
+    return true;
+  }
+
+  // 5. Fall back: Navigate to default Chandigarh University Learning Path
+  const defaultPathUrl = 'https://www.linkedin.com/learning/paths/chandigarh-university-introduction-to-problem-solving-14957838?u=92961692';
+  log('Navigating to default Learning Path URL:', defaultPathUrl);
+  showHUD('🎉 Returning to Chandigarh University Learning Path...', 'info');
+  await chrome.storage.local.set({
+    learningPathActive: true,
+    lastLearningPathUrl: defaultPathUrl
+  });
+  window.location.href = defaultPathUrl;
   return true;
 }
 
@@ -786,6 +1037,8 @@ function findButtonByText(pattern, includeDisabled = false) {
     if (isLanguageElement(el) || isInsideSidebar(el)) return false;
     if (!includeDisabled && !isElementClickable(el)) return false;
     const text = (el.innerText || el.value || el.getAttribute('aria-label') || '').trim();
+    if (!/certif/i.test(pattern.source) && /certif|sertifikat|\bcerts?\b/i.test(text)) return false;
+    if (!/continue watching/i.test(pattern.source) && /continue watching|lanjutkan menonton/i.test(text)) return false;
     return pattern.test(text);
   });
 }
@@ -811,18 +1064,26 @@ function clickElement(el) {
 
 function isInsideSidebar(el) {
   if (!el) return false;
+  // Match ONLY the actual sidebar contents, TOC list, or aside element.
+  // NEVER match layout wrappers with classes like classroom-layout--sidebar-open!
   return !!el.closest(
-    '#course-contents, [class*="toc"], [class*="syllabus"], [class*="sidebar"], nav, aside, [role="navigation"], li.classroom-toc-item, .classroom-layout__sidebar, .classroom-nav'
+    '#course-contents, aside, .classroom-layout__sidebar, ul.classroom-toc, li.classroom-toc-item, nav[aria-label="Table of contents" i], .classroom-toc-section'
   );
 }
 
 function isQuizOnPage() {
-  // RULE 1: If there is an HTML5 video element or video player container on page, it is 100% a VIDEO, NEVER a quiz!
-  if (document.querySelector('video, .classroom-video-player, [data-test-video-player], .video-js, .classroom-layout__video-player')) {
-    return false;
+  const mainArea = document.querySelector('main, .classroom-layout__main, .classroom-body, [role="main"]') || document.body;
+  const hasCounterOnPage = !!mainArea.querySelector('.quiz-challenge__counter, [class*="question-counter"], .quiz-step-counter');
+  const hasQuizCard = !!mainArea.querySelector('.quiz-challenge, [class*="quiz-challenge"], .classroom-quiz');
+  const bodyText = (document.body ? document.body.innerText : '');
+  const hasCounterText = /(?:question|pertanyaan|pregunta|frage)\s+\d+\s+(?:of|dari|de|von|\/)\s+\d+/i.test(bodyText);
+
+  // RULE 0: Check if dedicated quiz elements exist on page first (Question counter, quiz challenge card)
+  if (hasCounterOnPage || hasQuizCard || hasCounterText) {
+    return true;
   }
 
-  // RULE 2: Check URL pathname specifically for dedicated quiz or assessment routes
+  // RULE 1: Check URL pathname specifically for dedicated quiz or assessment routes
   const path = window.location.pathname.toLowerCase();
   if (
     path.includes('/quiz/') ||
@@ -836,51 +1097,20 @@ function isQuizOnPage() {
     return true;
   }
 
-  // RULE 3: Career Hub / Assessment Page Text Indicators
-  const bodyText = (document.body ? document.body.innerText : '');
+  // RULE 2: Career Hub / Assessment Page Text Indicators
   if (/learning career hub/i.test(bodyText) || /select (?:an|one)?\s*answer/i.test(bodyText)) {
     if (/(?:question|pertanyaan|pregunta|frage)\s+\d+\s+(?:of|dari|de|von|\/)\s+\d+/i.test(bodyText)) {
       return true;
     }
   }
 
-  // RULE 4: Exclude the sidebar TOC completely! The sidebar lists all items in the course.
-  const mainArea = document.querySelector('main, .classroom-layout__main, .classroom-body, [role="main"]');
-  const searchRoot = mainArea || document.body;
-
-  // RULE 5: Check for LinkedIn's dedicated quiz challenge containers strictly OUTSIDE sidebar
-  const quizCard = searchRoot.querySelector('.quiz-challenge, [data-test-quiz], [class*="quiz-challenge"], .classroom-quiz');
-  if (quizCard && !isInsideSidebar(quizCard)) {
-    return true;
+  // RULE 3: If an active playing video is present and no quiz elements, it is a video
+  if (document.querySelector('video, .classroom-video-player, [data-test-video-player], .video-js, .classroom-layout__video-player')) {
+    return false;
   }
 
-  // RULE 6: Check for Question Counter strictly OUTSIDE the sidebar TOC!
-  // E.g. "Question 1 of 8" or "Pertanyaan 1 dari 8"
-  const counterSelectors = [
-    '.quiz-challenge__counter',
-    '[class*="question-counter"]',
-    '.quiz-step-counter'
-  ];
-  for (const sel of counterSelectors) {
-    const el = searchRoot.querySelector(sel);
-    if (el && !isInsideSidebar(el)) {
-      return true;
-    }
-  }
-
-  // Check main area text for counter format (must NOT be inside sidebar)
-  const candidateElements = Array.from(searchRoot.querySelectorAll('h1, h2, h3, p, span, div, legend')).filter((el) => {
-    return !isInsideSidebar(el);
-  });
-  const hasCounter = candidateElements.some((el) => {
-    const t = (el.innerText || '').trim();
-    return /(?:question|pertanyaan|pregunta|frage)\s+\d+\s+(?:of|dari|de|von|\/)\s+\d+/i.test(t);
-  });
-  if (hasCounter) {
-    return true;
-  }
-
-  // RULE 7: Check for Start Quiz / Resume Quiz button strictly OUTSIDE sidebar
+  // RULE 4: Check for Start Quiz / Resume Quiz button strictly OUTSIDE sidebar
+  const searchRoot = mainArea;
   const buttons = Array.from(searchRoot.querySelectorAll('button, a[role="button"], input[type="button"]')).filter((b) => {
     return !isInsideSidebar(b);
   });
@@ -893,7 +1123,7 @@ function isQuizOnPage() {
     return true;
   }
 
-  // RULE 8: Active sidebar item check ONLY IF it has NO video duration and has explicit quiz title
+  // RULE 5: Active sidebar item check ONLY IF it has NO video duration and has explicit quiz title
   const activeSidebarItem = document.querySelector(
     'li.classroom-toc-item--selected, li.selected, li.active, [aria-current="page"]'
   );
@@ -934,13 +1164,16 @@ function isNumericString(s) {
 }
 
 function cleanOptionText(text) {
-  return cleanFormulaText(text);
+  return (text || '')
+    .trim()
+    .replace(/^([a-z\d][\.\)]|\([a-z\d]+\))\s+/i, '')
+    .replace(/\s+/g, ' ');
 }
 
 function isForbiddenQuizButton(b) {
   if (!b) return true;
   const t = (b.innerText || b.value || b.getAttribute('aria-label') || '').trim().toLowerCase();
-  return /previous|return to course|kembali|sebelumnya/i.test(t);
+  return /previous|return to course|kembali|sebelumnya|certif|sertifikat|\bcerts?\b|continue watching|lanjutkan menonton/i.test(t);
 }
 
 function findQuizActionAdvanceButton() {
@@ -972,10 +1205,6 @@ function findQuizActionAdvanceButton() {
       return siblings[siblings.length - 1];
     }
   }
-
-  // 4. Fallback to Skip button if present
-  const skipBtn = findButtonByText(/^skip$|^lewati$/i, true);
-  if (skipBtn && !isForbiddenQuizButton(skipBtn)) return skipBtn;
 
   return null;
 }
@@ -1176,6 +1405,17 @@ function parseCurrentQuizQuestion() {
   let promptText = '';
   const optionTexts = new Set(options.map((o) => cleanOptionText(o.text).toLowerCase()));
 
+  // Priority: Check dedicated question prompt elements on LinkedIn Learning
+  const explicitPrompt = searchRoot.querySelector(
+    'legend, .quiz-challenge__prompt, [class*="quiz-challenge__prompt"], [class*="quiz-prompt"], [class*="question-prompt"], [class*="question-text"]'
+  );
+  if (explicitPrompt && !isInsideSidebar(explicitPrompt)) {
+    const epText = (explicitPrompt.innerText || '').trim();
+    if (epText.length >= 8 && !/select (?:an|one)?\s*answer/i.test(epText) && !optionTexts.has(cleanOptionText(epText).toLowerCase())) {
+      promptText = epText;
+    }
+  }
+
   const promptCandidates = Array.from(searchRoot.querySelectorAll(
     'legend, [class*="prompt"], [class*="stem"], [class*="question-title"], [class*="question-text"], [class*="question"], h1, h2, h3, h4, p, div'
   )).filter((el) => {
@@ -1191,7 +1431,7 @@ function parseCurrentQuizQuestion() {
     return true;
   });
 
-  if (promptCandidates.length > 0) {
+  if (!promptText && promptCandidates.length > 0) {
     if (counterEl) {
       const afterCounter = promptCandidates.find((el) => {
         return (counterEl.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
@@ -1235,7 +1475,8 @@ async function selectOption(option, shouldCheck = true) {
 
   const input = option.input || (option.target && option.target.tagName === 'INPUT' ? option.target : option.target?.querySelector('input'));
   let label = option.label || (input ? (input.closest('label') || (input.id ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`) : null)) : null);
-  const target = label || option.target || input;
+  const card = option.card || option.target || label;
+  const target = label || card || input;
 
   if (!target || isLanguageElement(target) || isInsideSidebar(target)) {
     return false;
@@ -1246,7 +1487,7 @@ async function selectOption(option, shouldCheck = true) {
     target.focus();
   } catch (e) {}
 
-  // 1. Dispatch clean pointer & mouse sequence (Coursera Completer standard)
+  // 1. Dispatch full pointer and click events on target / label
   try {
     target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window }));
     target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
@@ -1255,31 +1496,34 @@ async function selectOption(option, shouldCheck = true) {
     target.click();
   } catch (e) {}
 
-  // 2. Also trigger click on any inner interactive child (button, input, label)
-  const innerEl = target.querySelector('button, [role="button"], input, label');
-  if (innerEl && innerEl !== target) {
-    try { innerEl.click(); } catch (e) {}
+  // 2. Click the custom radio indicator circle if present (Artdeco)
+  const indicator = target.querySelector('.artdeco-radio-indicator, [class*="indicator"], [class*="radio-circle"]') ||
+                    card?.querySelector('.artdeco-radio-indicator, [class*="indicator"], [class*="radio-circle"]');
+  if (indicator) {
+    try {
+      indicator.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    } catch (e) {}
   }
 
-  // 3. Enforce underlying input state via prototype setter for React/Artdeco
+  // 3. Click the underlying input element directly if present
   if (input) {
-    if (input.checked !== shouldCheck) {
-      try {
-        const protoSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'checked')?.set;
-        if (protoSetter) {
-          protoSetter.call(input, shouldCheck);
-        } else {
-          input.checked = shouldCheck;
-        }
-      } catch (e) {
-        input.checked = shouldCheck;
-      }
+    try {
+      input.focus();
+      input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      input.checked = shouldCheck;
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
-    }
+    } catch (e) {}
   }
 
-  // 4. ARIA checked / pressed state
+  // 4. Also click the card container if distinct from target
+  if (card && card !== target) {
+    try {
+      card.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    } catch (e) {}
+  }
+
+  // 5. Update ARIA state
   if (target.hasAttribute && target.hasAttribute('role')) {
     try {
       target.setAttribute('aria-checked', shouldCheck ? 'true' : 'false');
@@ -1289,33 +1533,37 @@ async function selectOption(option, shouldCheck = true) {
 
   await new Promise((r) => setTimeout(r, 200));
 
-  // 5. Ensure Submit / Advance button becomes enabled
+  // 6. Force-enable the Submit button
   const advanceBtn = findQuizActionAdvanceButton();
   if (advanceBtn) {
     try {
       advanceBtn.removeAttribute('disabled');
       advanceBtn.disabled = false;
       advanceBtn.setAttribute('aria-disabled', 'false');
+      advanceBtn.classList.remove('artdeco-button--disabled');
     } catch (e) {}
   }
 
-  return true;
 }
 
 async function selectOptionAndVerify(option) {
   return selectOption(option, true);
 }
 
-function resolveSingleChoiceOption(options, ans) {
+function resolveSingleChoiceOption(options, ans, knownWrongAnswers = []) {
   if (!options || options.length === 0) return { index: -1, reason: 'No options available' };
   const ansTexts = (ans.answerTexts || []).map((t) => (t || '').trim()).filter(Boolean);
   const ansIndices = ans.answerIndices || [];
+
+  const isWrong = (txt) => {
+    return (knownWrongAnswers || []).some((w) => cleanFormulaText(w) === cleanFormulaText(txt) || stripAll(w) === stripAll(txt));
+  };
 
   // TIER 1: Exact / Clean Formula Match
   for (const ansText of ansTexts) {
     const cleanAns = cleanFormulaText(ansText);
     const matchIdx = options.findIndex((o) => cleanFormulaText(o.text) === cleanAns);
-    if (matchIdx !== -1) {
+    if (matchIdx !== -1 && !isWrong(options[matchIdx].text)) {
       return { index: matchIdx, reason: `Exact formula match: "${ansText}"` };
     }
   }
@@ -1325,7 +1573,7 @@ function resolveSingleChoiceOption(options, ans) {
     if (isNumericString(ansText)) {
       const numAns = Number(ansText);
       const matchIdx = options.findIndex((o) => isNumericString(o.text) && Math.abs(Number(o.text) - numAns) < 1e-5);
-      if (matchIdx !== -1) {
+      if (matchIdx !== -1 && !isWrong(options[matchIdx].text)) {
         return { index: matchIdx, reason: `Numeric equality match: ${numAns}` };
       }
     }
@@ -1336,7 +1584,7 @@ function resolveSingleChoiceOption(options, ans) {
     const strippedAns = stripAll(ansText);
     if (strippedAns.length >= 2) {
       const matchIdx = options.findIndex((o) => stripAll(o.text) === strippedAns);
-      if (matchIdx !== -1) {
+      if (matchIdx !== -1 && !isWrong(options[matchIdx].text)) {
         return { index: matchIdx, reason: `Normalized match: "${ansText}"` };
       }
     }
@@ -1345,7 +1593,7 @@ function resolveSingleChoiceOption(options, ans) {
   // TIER 4: Verified Index Match
   if (ansIndices.length > 0) {
     const idx = ansIndices[0];
-    if (options[idx]) {
+    if (options[idx] && !isWrong(options[idx].text)) {
       if (ansTexts.length === 0) {
         return { index: idx, reason: `Direct index [${idx}]` };
       }
@@ -1365,15 +1613,22 @@ function resolveSingleChoiceOption(options, ans) {
         const optClean = cleanFormulaText(o.text);
         return !isNumericString(optClean) && (optClean.includes(cleanAns) || cleanAns.includes(optClean));
       });
-      if (matchIdx !== -1) {
+      if (matchIdx !== -1 && !isWrong(options[matchIdx].text)) {
         return { index: matchIdx, reason: `Substring match: "${ansText}" in "${options[matchIdx].text}"` };
       }
     }
   }
 
-  // TIER 6: Fallback to index if within bounds
-  if (ansIndices.length > 0 && options[ansIndices[0]]) {
+  // TIER 6: Fallback to index if within bounds and not wrong
+  if (ansIndices.length > 0 && options[ansIndices[0]] && !isWrong(options[ansIndices[0]].text)) {
     return { index: ansIndices[0], reason: `Fallback index [${ansIndices[0]}]` };
+  }
+
+  // TIER 7: First un-eliminated option
+  for (let i = 0; i < options.length; i++) {
+    if (!isWrong(options[i].text)) {
+      return { index: i, reason: `Uneliminated candidate [${i}]` };
+    }
   }
 
   return { index: 0, reason: 'Default index 0 fallback' };
@@ -1472,43 +1727,139 @@ function resolveAnswerIndices(question, aiAnswer) {
   return single.index >= 0 ? [single.index] : [0];
 }
 
+const quizWrongAnswersMap = new Map();
+const quizCorrectAnswersMap = new Map();
+
+/**
+ * Scrapes LinkedIn Learning quiz review screen to learn verified correct and incorrect answers.
+ */
+function learnFromQuizReviewScreen() {
+  try {
+    const questionContainers = Array.from(document.querySelectorAll(
+      '.quiz-challenge__question, .quiz-review__question, [class*="quiz-challenge"], [class*="assessment-question"], fieldset, form, li.quiz-challenge, [class*="review-question"]'
+    ));
+
+    const cards = questionContainers.length > 0 ? questionContainers : Array.from(document.querySelectorAll('[class*="challenge"], [class*="review"], article, section'));
+
+    let learnedCount = 0;
+    for (const card of cards) {
+      const promptEl = card.querySelector('legend, .quiz-challenge__prompt, [class*="prompt"], [class*="question-text"], h2, h3, h4');
+      if (!promptEl) continue;
+      const promptText = (promptEl.innerText || '').trim();
+      if (promptText.length < 8) continue;
+      const qKey = promptText.toLowerCase();
+
+      // Find options in this card
+      const optionEls = card.querySelectorAll('li, label, [role="radio"], [role="checkbox"], [class*="option"], [class*="choice"], [class*="answer"]');
+      for (const optEl of optionEls) {
+        const optText = cleanOptionText((optEl.innerText || '').trim());
+        if (!optText || optText.length < 2) continue;
+
+        const optHtml = optEl.outerHTML.toLowerCase();
+        const optAria = (optEl.getAttribute('aria-label') || '').toLowerCase();
+
+        const isCorrect = /correct|benar|richtig|vrai|corretto/i.test(optAria) ||
+          optEl.querySelector('[class*="correct"], [data-test-icon*="check"], li-icon[type*="check"]') !== null ||
+          /quiz-challenge__status--correct|status--correct|feedback--correct/i.test(optHtml);
+
+        const isIncorrect = /incorrect|salah|falsch|faux|scorretto/i.test(optAria) ||
+          optEl.querySelector('[class*="incorrect"], [data-test-icon*="close"], [data-test-icon*="x"]') !== null ||
+          /quiz-challenge__status--incorrect|status--incorrect|feedback--incorrect/i.test(optHtml);
+
+        if (isCorrect && !isIncorrect) {
+          quizCorrectAnswersMap.set(qKey, optText);
+          learnedCount++;
+          log(`Learned CORRECT answer for "${promptText}": "${optText}"`);
+        } else if (isIncorrect) {
+          const wrongList = quizWrongAnswersMap.get(qKey) || [];
+          if (!wrongList.includes(optText)) wrongList.push(optText);
+          quizWrongAnswersMap.set(qKey, wrongList);
+          log(`Learned INCORRECT answer for "${promptText}": "${optText}"`);
+        }
+      }
+    }
+    if (learnedCount > 0) {
+      log(`Total learned ${learnedCount} verified answers from review screen!`);
+      showHUD(`🧠 Learned ${learnedCount} verified answers from review!`, 'success');
+    }
+  } catch (e) {
+    log('Error scraping review screen:', e);
+  }
+}
+
 async function askAIForQuestion(q) {
-  let prompt = `You are a distinguished university professor and academic quiz solver with 100% precision.\n`;
-  prompt += `Solve the following LinkedIn Learning quiz question with absolute accuracy.\n\n`;
-  prompt += `QUESTION:\n`;
-  prompt += `Type: ${q.type === 'checkbox' ? 'multiple_choice (select all that apply)' : 'single_choice (select exactly one)'}\n`;
-  prompt += `Prompt: ${q.prompt}\n`;
-  prompt += `Options:\n`;
+  const questionKey = (q.prompt || '').trim().toLowerCase();
+
+  // 1. Check if we already have the verified correct answer from review feedback!
+  const knownCorrectAnswer = quizCorrectAnswersMap.get(questionKey);
+  if (knownCorrectAnswer) {
+    log(`Using verified correct answer for "${q.prompt}": "${knownCorrectAnswer}"`);
+    const matchIdx = q.options.findIndex((o) => cleanFormulaText(o.text) === cleanFormulaText(knownCorrectAnswer) || stripAll(o.text) === stripAll(knownCorrectAnswer));
+    const targetIdx = matchIdx !== -1 ? matchIdx : 0;
+    return {
+      answerIndices: [targetIdx],
+      answerTexts: [q.options[targetIdx]?.text || knownCorrectAnswer],
+      rationale: 'Verified correct from previous attempt review feedback.',
+      provider: 'Verified Review Memory'
+    };
+  }
+
+  const courseTitle = document.querySelector('h1, [data-test-hero-title], .classroom-nav__title, .classroom-sidebar__title')?.innerText?.trim() || document.title;
+  const chapterTitle = document.querySelector('li.classroom-toc-section--selected, .classroom-toc-chapter, [aria-current="true"]')?.innerText?.split('\n')?.[0]?.trim() || '';
+
+  const knownWrongAnswers = quizWrongAnswersMap.get(questionKey) || [];
+
+  let prompt = `You are a distinguished university professor and academic expert solving a certification exam with 100% precision.\n`;
+  prompt += `Solve the following LinkedIn Learning course quiz question with absolute accuracy.\n\n`;
+  if (courseTitle) prompt += `COURSE NAME: ${courseTitle}\n`;
+  if (chapterTitle) prompt += `CHAPTER / LESSON TOPIC: ${chapterTitle}\n`;
+  prompt += `QUESTION TYPE: ${q.type === 'checkbox' ? 'Multiple choice (select ALL that apply)' : 'Single choice (select EXACTLY ONE best answer)'}\n`;
+  prompt += `QUESTION PROMPT: ${q.prompt}\n\n`;
+  prompt += `OPTIONS:\n`;
   q.options.forEach((opt, oIdx) => {
     prompt += `[Index ${oIdx}]: ${opt.text}\n`;
   });
-  prompt += `\n`;
-  prompt += `CRITICAL INSTRUCTIONS:
-1. In 'rationale', write concise step-by-step reasoning proving why the chosen option is correct.
+
+  if (knownWrongAnswers.length > 0) {
+    prompt += `\nCRITICAL NEGATIVE FEEDBACK: The following option(s) were previously tested and confirmed INCORRECT by LinkedIn Learning: ${JSON.stringify(knownWrongAnswers)}. DO NOT select any of these incorrect options!\n`;
+  }
+
+  prompt += `\nCRITICAL INSTRUCTIONS:
+1. In 'answerIndices', provide the matching 0-based index(es) from the provided Options list (e.g. [1]).
 2. In 'answerTexts', provide the EXACT verbatim string(s) from the provided Options list matching your answer.
-3. In 'answerIndices', provide the matching 0-based index(es) from the provided Options list.
-4. For single_choice (radio): select EXACTLY ONE answer.
+3. In 'rationale', write one concise sentence explaining why the selected option is correct.
+4. For single_choice (radio): select EXACTLY ONE best answer.
 5. For multiple_choice (checkbox): select ALL correct options.
 
 Output ONLY a valid JSON object without Markdown formatting:
 {
-  "rationale": "reasoning",
   "answerIndices": [0],
-  "answerTexts": ["exact option string"]
+  "answerTexts": ["exact option string"],
+  "rationale": "One concise sentence reasoning"
 }`;
 
   const response = await new Promise((resolve) => {
     chrome.runtime.sendMessage({ action: 'ASK_AI', prompt }, resolve);
   });
 
+  // Calculate smart fallback index avoiding known wrong answers:
+  let fallbackIdx = 0;
+  for (let i = 0; i < q.options.length; i++) {
+    const optText = q.options[i].text;
+    if (!knownWrongAnswers.some(w => cleanFormulaText(w) === cleanFormulaText(optText) || stripAll(w) === stripAll(optText))) {
+      fallbackIdx = i;
+      break;
+    }
+  }
+
   if (!response || !response.success || !response.text) {
-    log('AI request failed, fallback to index 0:', response?.error);
+    log(`AI request failed, fallback to index ${fallbackIdx}:`, response?.error);
     showHUD(`⚠️ AI Key Notice: ${response?.error || 'Using smart fallback'}`, 'error');
     await addLog(`AI request failed: ${response?.error || 'Unknown error'}`, 'warn');
     return {
-      answerIndices: [0],
-      answerTexts: [],
-      provider: 'Fallback (Index 0)',
+      answerIndices: [fallbackIdx],
+      answerTexts: [q.options[fallbackIdx]?.text || ''],
+      provider: `Fallback (Index ${fallbackIdx})`,
       rawPrompt: prompt,
       rawResponse: response?.error || 'No response'
     };
@@ -1526,9 +1877,20 @@ Output ONLY a valid JSON object without Markdown formatting:
     }
   }
 
+  // Regex fallback if JSON parsing failed
+  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.answerIndices)) {
+    const idxMatch = text.match(/"answerIndices"\s*:\s*\[([0-9,\s]+)\]/i);
+    if (idxMatch) {
+      const extractedIndices = idxMatch[1].split(',').map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n));
+      if (extractedIndices.length > 0) {
+        parsed = { answerIndices: extractedIndices, answerTexts: [] };
+      }
+    }
+  }
+
   if (Array.isArray(parsed)) parsed = parsed[0];
   if (!parsed || typeof parsed !== 'object') {
-    parsed = { answerIndices: [0], answerTexts: [] };
+    parsed = { answerIndices: [fallbackIdx], answerTexts: [q.options[fallbackIdx]?.text || ''] };
   }
   parsed.provider = response.provider || 'AI';
   parsed.rawPrompt = prompt;
@@ -1560,17 +1922,7 @@ async function solveLinkedInQuiz() {
       step++;
       await new Promise((r) => setTimeout(r, 700));
 
-      // 1. Check for "Next question" or "Next" button (if previous answer was already evaluated and passed)
-      const nextQuestionBtn = findButtonByText(/^next$|^next question$|^lanjutkan$|^berikutnya$/i);
-      if (nextQuestionBtn && isElementClickable(nextQuestionBtn)) {
-        log('Advancing to next question:', nextQuestionBtn.innerText);
-        showHUD(`▶ Advancing to next question...`);
-        clickElement(nextQuestionBtn);
-        await new Promise((r) => setTimeout(r, 1200));
-        continue;
-      }
-
-      // 2. Check for "Start quiz", "Resume quiz", or "Take quiz" button
+      // 1. Check for "Start quiz", "Resume quiz", or "Take quiz" button
       const startBtn = findButtonByText(/start quiz|resume quiz|take quiz|begin quiz|mulai kuis|mulai tes/i);
       if (startBtn && isElementClickable(startBtn)) {
         log('Clicking Start/Resume Quiz button:', startBtn.innerText);
@@ -1580,7 +1932,7 @@ async function solveLinkedInQuiz() {
         continue;
       }
 
-      // 3. Check for "View results" or "See results" button
+      // 2. Check for "View results" or "See results" button
       const resultsBtn = findButtonByText(/view results|see results|lihat hasil/i);
       if (resultsBtn && isElementClickable(resultsBtn)) {
         log('Clicking View Results button:', resultsBtn.innerText);
@@ -1590,21 +1942,83 @@ async function solveLinkedInQuiz() {
         continue;
       }
 
-      // 4. Parse the current active question
-      const currentQ = parseCurrentQuizQuestion();
+      // 3. Check if previous answer was already evaluated and feedback is displayed
+      const feedbackPresent = !!document.querySelector(
+        '.quiz-challenge__feedback, [class*="feedback"], .quiz-challenge__status, [aria-label*="correct" i], [aria-label*="incorrect" i]'
+      );
+      const nextQuestionBtn = findButtonByText(/^next question$|^soal berikutnya$/i);
+      if ((feedbackPresent || nextQuestionBtn) && nextQuestionBtn && isElementClickable(nextQuestionBtn)) {
+        log('Advancing to next question:', nextQuestionBtn.innerText);
+        showHUD(`▶ Advancing to next question...`);
+        clickElement(nextQuestionBtn);
+        await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
+
+      // 4. Parse the current active question (with retries for dynamic mounting)
+      let currentQ = parseCurrentQuizQuestion();
       if (!currentQ || currentQ.options.length < 2) {
-        // No active question on screen -> Check for final continue or "Return to course" button on results/summary screen
+        for (let r = 0; r < 3; r++) {
+          await new Promise((res) => setTimeout(res, 600));
+          currentQ = parseCurrentQuizQuestion();
+          if (currentQ && currentQ.options.length >= 2) break;
+        }
+      }
+
+      if (!currentQ || currentQ.options.length < 2) {
+        const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
+        const isFailedScreen = /keep practicing|retake the quiz|take the quiz again|try again|review your answers|answered \d+ of \d+ questions correctly/i.test(bodyText);
+
+        // If quiz was NOT passed, NEVER click continue! Trigger retake or review!
+        if (isFailedScreen) {
+          log('Quiz score screen: quiz not passed yet. Looking for Retake or Review...');
+          const retakeBtn = findButtonByText(/^retake$|retake quiz|take quiz again|try again|restart quiz|take again/i);
+          if (retakeBtn && isElementClickable(retakeBtn)) {
+            log('Clicking Retake button on score screen:', retakeBtn.innerText);
+            showHUD(`▶ Retrying quiz: "${retakeBtn.innerText}"...`);
+            clickElement(retakeBtn);
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
+
+          const reviewBtn = findButtonByText(/review all answers|review answers|tinjau jawaban/i);
+          if (reviewBtn && isElementClickable(reviewBtn)) {
+            log('Clicking Review all answers to learn correct options:', reviewBtn.innerText);
+            clickElement(reviewBtn);
+            await new Promise((r) => setTimeout(r, 2000));
+            learnFromQuizReviewScreen();
+            const retakeAfterReview = findButtonByText(/^retake$|retake quiz|take quiz again|try again/i);
+            if (retakeAfterReview && isElementClickable(retakeAfterReview)) {
+              clickElement(retakeAfterReview);
+              await new Promise((r) => setTimeout(r, 2000));
+              continue;
+            }
+          }
+
+          // Stop loop to let the retry engine handle restarting the quiz via TOC
+          break;
+        }
+
+        // Passed screen: Check for final continue or "Return to course" button
         const finalContinueBtn = findButtonByText(
-          /return to course|back to course|kembali ke kursus|submit and continue|continue learning|continue to next|next lesson|finish quiz|done|^continue$/i
+          /return to course|back to course|kembali ke kursus|submit and continue|next lesson|finish quiz|done/i
         );
-        if (finalContinueBtn && isElementClickable(finalContinueBtn)) {
-          log('Found final submit / continue / return button on results screen:', finalContinueBtn.innerText);
+        if (finalContinueBtn && isElementClickable(finalContinueBtn) && !isForbiddenQuizButton(finalContinueBtn)) {
+          log('Found final submit / return button on passed screen:', finalContinueBtn.innerText);
           showHUD(`✓ Quiz finished! Clicking "${finalContinueBtn.innerText}"...`, 'success');
           sendProgress({ message: `✓ Quiz finished! Clicking "${finalContinueBtn.innerText}"...` });
           await addLog(`✓ Quiz completed! Clicking "${finalContinueBtn.innerText}"`, 'success');
           clickElement(finalContinueBtn);
           await new Promise((r) => setTimeout(r, 2000));
           break;
+        }
+
+        // Check if there is an un-clicked results or next button
+        const lingeringNext = findButtonByText(/^next question$|^view results$|^see results$/i);
+        if (lingeringNext && isElementClickable(lingeringNext) && !isForbiddenQuizButton(lingeringNext)) {
+          clickElement(lingeringNext);
+          await new Promise((r) => setTimeout(r, 1400));
+          continue;
         }
 
         // Check if quiz is already marked as completed in syllabus
@@ -1682,7 +2096,9 @@ async function solveLinkedInQuiz() {
         showHUD(`✓ Marked: [${markedTexts.join(', ')}]`);
         log(`Selected checkbox options [${chosenIndices.join(', ')}]: "${markedTexts.join(', ')}"`);
       } else {
-        const resolution = resolveSingleChoiceOption(currentQ.options, aiAnswer);
+        const qKey = (currentQ.prompt || '').trim().toLowerCase();
+        const knownWrong = quizWrongAnswersMap.get(qKey) || [];
+        const resolution = resolveSingleChoiceOption(currentQ.options, aiAnswer, knownWrong);
         const chosenIdx = resolution.index >= 0 ? resolution.index : 0;
         chosenIndices = [chosenIdx];
         const chosenOpt = currentQ.options[chosenIdx];
@@ -1758,6 +2174,19 @@ async function solveLinkedInQuiz() {
 
       // Wait 1.4s for LinkedIn to evaluate and transition
       await new Promise((r) => setTimeout(r, 1400));
+
+      // Record incorrect answers in memory so retries eliminate wrong options
+      const isIncorrectFeedback = !!document.querySelector('.quiz-challenge__feedback--incorrect, [class*="feedback--incorrect"], [class*="status--incorrect"], [aria-label*="incorrect" i]');
+      const feedbackText = (document.querySelector('.quiz-challenge__feedback, [class*="feedback"], .quiz-challenge__status')?.innerText || '').toLowerCase();
+      if (isIncorrectFeedback || feedbackText.includes('incorrect') || feedbackText.includes('salah')) {
+        const qKey = (currentQ.prompt || '').trim().toLowerCase();
+        const wrongList = quizWrongAnswersMap.get(qKey) || [];
+        for (const t of markedTexts) {
+          if (!wrongList.includes(t)) wrongList.push(t);
+        }
+        quizWrongAnswersMap.set(qKey, wrongList);
+        log(`Recorded wrong answer for "${currentQ.prompt}":`, wrongList);
+      }
 
       // 8. If follow-up "Next question", "Next", or "Submit and continue" appeared after submission
       const followUpBtn = findButtonByText(
@@ -1847,66 +2276,66 @@ async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
 
     await solveLinkedInQuiz();
 
-    // Check for any lingering "Return to course", "Submit and continue", or "Continue" button
-    const lingeringSubmit = findButtonByText(/return to course|back to course|kembali ke kursus|submit and continue|continue learning|continue to next|^continue$/i);
-    if (lingeringSubmit && isElementClickable(lingeringSubmit)) {
-      log('Clicking final submit / return button:', lingeringSubmit.innerText);
-      showHUD(`✓ Finalizing quiz: "${lingeringSubmit.innerText}"...`, 'success');
-      clickElement(lingeringSubmit);
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-
-    // Pause 2.5s for LinkedIn's backend to process answers and update syllabus checkmark
+    // Pause 2s for LinkedIn backend to process answers and update checkmark
     showHUD('⏳ Verifying green tick in syllabus...');
-    await new Promise((r) => setTimeout(r, 2500));
+    await new Promise((r) => setTimeout(r, 2000));
 
-    const isVerified = await verifyQuizGreenTick(5000);
+    const isVerified = await verifyQuizGreenTick(4000);
     if (isVerified) {
       log('🎉 Green tick / Completion CONFIRMED on quiz!');
       showHUD('✅ Verified! Quiz completed.', 'success');
       sendProgress({ message: '🎉 Chapter Quiz verified!' });
+
+      // Click lingering "Return to course" or "Submit and continue" now that quiz is verified
+      const lingeringSubmit = findButtonByText(/return to course|back to course|kembali ke kursus|submit and continue|next lesson/i);
+      if (lingeringSubmit && isElementClickable(lingeringSubmit) && !isForbiddenQuizButton(lingeringSubmit)) {
+        log('Clicking final return / continue button:', lingeringSubmit.innerText);
+        clickElement(lingeringSubmit);
+        await new Promise((r) => setTimeout(r, 2000));
+      }
       return true;
     }
 
     // No green tick verified -> Retry
     log(`⚠️ Attempt ${attempt}: No green tick detected on syllabus. Retrying quiz...`);
-    showHUD(`⚠️ No green tick found. Retrying quiz (attempt ${attempt + 1})...`, 'warn');
+    showHUD(`⚠️ Quiz not passed. Retrying quiz (attempt ${attempt + 1})...`, 'warn');
 
     if (attempt < maxRetries) {
       await new Promise((r) => setTimeout(r, 1200));
 
-      // 1. Look for Retake / Try again button
-      const retakeBtn = findButtonByText(/^retake$|retake quiz|take quiz again|try again|restart quiz|take again/i);
+      // 1. Look for Retake / Try again / Take quiz again button
+      const retakeBtn = findButtonByText(
+        /^retake$|retake quiz|take quiz again|try again|restart quiz|take again|resume exam|retake exam|take exam|resume quiz|retake assessment/i
+      );
       if (retakeBtn && isElementClickable(retakeBtn)) {
         log('Clicking Retake Quiz button:', retakeBtn.innerText);
         showHUD(`▶ Clicking "${retakeBtn.innerText}"...`);
         clickElement(retakeBtn);
         await new Promise((r) => setTimeout(r, 2000));
       } else {
-        // Check for Return to course on Career Hub assessments before reloading
-        const returnBtn = findButtonByText(/return to course|back to course|kembali ke kursus/i);
-        if (returnBtn && isElementClickable(returnBtn)) {
-          log('Career Hub assessment completed, returning to course:', returnBtn.innerText);
-          clickElement(returnBtn);
-          await new Promise((r) => setTimeout(r, 2500));
-          return true;
-        }
-
-        // 2. Check for any remaining Submit and continue or View results button
-        const finalBtn = findButtonByText(/submit and continue|continue|view results/i);
-        if (finalBtn && isElementClickable(finalBtn)) {
-          clickElement(finalBtn);
+        // 2. Check for "Review all answers" button to see explanations and reveal Retake button
+        const reviewBtn = findButtonByText(/review all answers|review answers|tinjau jawaban/i);
+        if (reviewBtn && isElementClickable(reviewBtn)) {
+          log('Clicking Review all answers to learn correct options:', reviewBtn.innerText);
+          clickElement(reviewBtn);
           await new Promise((r) => setTimeout(r, 2000));
-          const recheck = await verifyQuizGreenTick(3000);
-          if (recheck) return true;
+          learnFromQuizReviewScreen();
+          const retakeAfter = findButtonByText(/^retake$|retake quiz|take quiz again|try again|restart quiz/i);
+          if (retakeAfter && isElementClickable(retakeAfter)) {
+            clickElement(retakeAfter);
+            await new Promise((r) => setTimeout(r, 2000));
+          }
+        } else {
+          // 3. Fallback: Click Chapter Quiz in TOC sidebar to restart the quiz attempt
+          const tocQuiz = document.querySelector(
+            'li.classroom-toc-item--selected a, #course-contents a[href*="/quiz/"]'
+          );
+          if (tocQuiz && isElementClickable(tocQuiz)) {
+            log('Clicking Chapter Quiz in TOC sidebar to reset attempt...');
+            clickElement(tocQuiz);
+            await new Promise((r) => setTimeout(r, 2500));
+          }
         }
-
-        // 3. Fallback: reload page to reset question state
-        log('No retake button found. Reloading quiz page to retry...');
-        showHUD('▶ Reloading quiz page to retry attempt...');
-        await new Promise((r) => setTimeout(r, 1500));
-        window.location.reload();
-        return false;
       }
     }
   }
@@ -1999,8 +2428,44 @@ async function runAutonomousStep() {
       return; // Re-run step after survey is dismissed
     }
 
-    // 0. CHECK FIRST: If page is a quiz or Career Hub assessment, solve it immediately!
+    // -0.4. GLOBAL NAV / CERTIFICATES / OFF-TRACK ESCAPE RESCUE
+    if (isGlobalNavPage()) {
+      log('Detected on off-track global nav page (' + window.location.pathname + '). Returning to Learning Path...');
+      showHUD('↩ Escaping global nav... Returning to Learning Path', 'warn');
+      const returned = await returnToLearningPath();
+      if (!returned) {
+        window.history.back();
+      }
+      return;
+    }
+
+    // 0. CHECK FIRST: If page is a quiz or Career Hub assessment, check completion first then solve!
     if (isQuizOnPage()) {
+      // 0a. GREEN TICK CHECK ON QUIZ: If this quiz ALREADY has a green checkmark or is already passed, SKIP IT!
+      const alreadyPassed = await verifyQuizGreenTick(800);
+      if (alreadyPassed) {
+        log('⏩ Quiz already passed with green tick! Skipping to next task...');
+        showHUD('⏩ Quiz already completed! Skipping to next task...', 'success');
+
+        const returnBtn = findButtonByText(/return to course|back to course|kembali ke kursus|submit and continue|continue learning|^continue$/i);
+        if (returnBtn && isElementClickable(returnBtn)) {
+          clickElement(returnBtn);
+          await new Promise((r) => setTimeout(r, 1500));
+        }
+
+        expandAllSections();
+        const syllabus = getCourseSyllabus();
+        const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
+        const currentLessonIndex = syllabus.findIndex((l) => {
+          const h = (l.href || '').toLowerCase();
+          return h.includes(currentPath) || currentPath.includes(h);
+        });
+        const storedConfig = await chrome.storage.local.get(['focusMode']);
+        const activeFocusMode = storedConfig.focusMode || focusMode || 'pending_only';
+        await advanceToNextItem(syllabus, currentLessonIndex, activeFocusMode);
+        return;
+      }
+
       const storedConfig = await chrome.storage.local.get([
         'focusMode',
         'autoSolveQuizzes',
@@ -2109,13 +2574,28 @@ async function runAutonomousStep() {
       return;
     }
 
-    // 2. Identify current lesson
+    // 2. Identify current lesson & check if it already has a green tick
     const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
     const currentLessonIndex = syllabus.findIndex((l) => {
       const h = (l.href || '').toLowerCase();
       return h.includes(currentPath) || currentPath.includes(h);
     });
     const currentLesson = currentLessonIndex !== -1 ? syllabus[currentLessonIndex] : null;
+
+    // Check active item in sidebar for green tick as well
+    const activeSidebarItem = document.querySelector(
+      'li.classroom-toc-item--selected, li.selected, li.active, [aria-current="page"], [aria-selected="true"]'
+    );
+    const activeIsCompleted = (currentLesson && currentLesson.completed) ||
+                              (activeSidebarItem && isLessonCompleted(activeSidebarItem.closest('li') || activeSidebarItem));
+
+    // If current item (video or quiz) has a green checkmark, skip immediately!
+    if (activeIsCompleted) {
+      log(`⏩ Current item "${currentLesson?.title || 'Active'}" already verified with green tick. Skipping immediately...`);
+      showHUD(`⏩ Green tick verified! Skipping to next task...`, 'info');
+      await advanceToNextItem(syllabus, currentLessonIndex, activeFocusMode);
+      return;
+    }
 
     sendProgress({
       message: currentLesson
@@ -2128,17 +2608,17 @@ async function runAutonomousStep() {
     });
 
     // 3. Classify whether current page is an active Video or Quiz
-    const video = document.querySelector('video');
-    const hasVideo = !!video;
-    const isCurrentVideo = hasVideo || (currentLesson && currentLesson.isVideo && !currentLesson.isQuiz);
-
-    const isCurrentQuiz = !isCurrentVideo && (
+    const isCurrentQuiz = (
       isQuizOnPage() ||
       currentPath.includes('/quiz/') ||
       currentPath.includes('/assessment/') ||
       currentPath.includes('/exam/') ||
       (currentLesson && currentLesson.isQuiz)
     );
+
+    const video = !isCurrentQuiz ? document.querySelector('video') : null;
+    const hasVideo = !!video;
+    const isCurrentVideo = !isCurrentQuiz && (hasVideo || (currentLesson && currentLesson.isVideo));
 
     // 4. If currently on a Quiz:
     if (isCurrentQuiz) {
@@ -2334,6 +2814,14 @@ function navigateToLesson(lesson) {
   if (!lesson) return;
   const targetUrl = lesson.fullHref || lesson.href;
   if (!targetUrl) return;
+
+  // Block any accidental navigation to certificates
+  if (/\b(?:certificates?|sertifikat)\b/i.test(targetUrl)) {
+    log('Blocked navigation to certificates link! Returning to learning path instead...');
+    returnToLearningPath();
+    return;
+  }
+
   log('Navigating to lesson:', lesson.title, '->', targetUrl);
   isNavigatingToLesson = true;
 
@@ -2444,23 +2932,44 @@ function goToNextLesson() {
   for (const sel of playerSelectors) {
     const btn = document.querySelector(sel);
     if (btn && !isLanguageElement(btn) && !btn.disabled && btn.offsetParent !== null) {
-      btn.click();
-      return true;
+      const t = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase();
+      if (!/\b(?:certificate|certificates|sertifikat)\b/i.test(t)) {
+        btn.click();
+        return true;
+      }
     }
   }
 
   try {
-    const currentPath = window.location.pathname;
-    const tocLinks = Array.from(document.querySelectorAll('a[href*="/learning/"]'))
-      .filter((a) => a.href && a.href.includes('/learning/'));
+    // STRICTLY search within the syllabus sidebar TOC! Never query whole document!
+    const sidebar = document.querySelector('#course-contents, [class*="classroom-toc"], ul.classroom-toc');
+    if (!sidebar) {
+      returnToLearningPath();
+      return false;
+    }
+
+    const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
+    const tocLinks = Array.from(sidebar.querySelectorAll('a[href*="/learning/"]'))
+      .filter((a) => {
+        const href = (a.getAttribute('href') || a.href || '').toLowerCase();
+        const text = (a.innerText || '').trim().toLowerCase();
+        if (/\b(?:certificate|certificates|sertifikat|cert|exercise|overview|transcript|notebook|review|share)\b/i.test(href + ' ' + text)) {
+          return false;
+        }
+        return true;
+      });
 
     const currentIndex = tocLinks.findIndex((a) => {
-      const href = a.getAttribute('href') || '';
+      const href = (a.getAttribute('href') || a.href || '').toLowerCase();
       return href.includes(currentPath) || a.classList.contains('active') || a.getAttribute('aria-current') === 'page';
     });
 
     if (currentIndex !== -1 && currentIndex + 1 < tocLinks.length) {
       tocLinks[currentIndex + 1].click();
+      return true;
+    } else if (currentIndex !== -1 && currentIndex + 1 >= tocLinks.length) {
+      log('Reached end of course syllabus in goToNextLesson. Returning to learning path...');
+      returnToLearningPath();
       return true;
     }
   } catch (e) {}
@@ -2483,6 +2992,15 @@ function startWatchdog() {
       if (isRunningAutonomousStep || isNavigatingToLesson || isSolvingQuiz) {
         return;
       }
+      if (isGlobalNavPage()) {
+        log('Watchdog: Detected on off-track global nav page. Escaping to Learning Path...');
+        runAutonomousStep();
+        return;
+      }
+      if (isLearningPathPage()) {
+        runAutonomousStep();
+        return;
+      }
       if (!videoEl || videoEl.ended || videoEl.paused) {
         runAutonomousStep();
       }
@@ -2490,6 +3008,7 @@ function startWatchdog() {
     }
 
     if (!videoEl) {
+      if (isLearningPathPage()) return;
       const found = document.querySelector('video');
       if (found) {
         attachToVideo(found);
@@ -2552,6 +3071,7 @@ function startWatchdog() {
 let _listenerController = null;
 
 function attachToVideo(video) {
+  if (isLearningPathPage()) return;
   if (video === videoEl) return;
   isNavigatingToLesson = false;
 
@@ -2597,6 +3117,7 @@ function attachToVideo(video) {
 
 function startObserver() {
   const tryFind = () => {
+    if (isLearningPathPage()) return;
     const v = document.querySelector('video');
     if (v && v !== videoEl) attachToVideo(v);
   };
@@ -2682,12 +3203,26 @@ async function init() {
     if (stored.learningPathActive) learningPathActive = true;
     if (stored.lastLearningPathUrl) lastLearningPathUrl = stored.lastLearningPathUrl;
 
+    if (window.location.href.includes('/paths/')) {
+      learningPathActive = true;
+      lastLearningPathUrl = window.location.href;
+      chrome.storage.local.set({
+        learningPathActive: true,
+        lastLearningPathUrl: window.location.href
+      });
+    }
+
     if (stored.bulkActive === true) {
       log('Resuming autonomous bulk course completion...');
       if (learningPathActive) {
         log('Learning Path mode active. Path URL:', lastLearningPathUrl);
       }
       isBulkActive = true;
+      if (isGlobalNavPage()) {
+        log('Init: On off-track global nav page with bulkActive=true. Escaping immediately...');
+        setTimeout(() => { returnToLearningPath(); }, 400);
+        return;
+      }
       setTimeout(runAutonomousStep, 1000);
     }
   }
@@ -2702,6 +3237,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.focusMode) focusMode = message.focusMode;
     if (message.speed) currentSpeed = parseFloat(message.speed) || currentSpeed;
     isBulkActive = true;
+    if (window.location.href.includes('/paths/')) {
+      learningPathActive = true;
+      lastLearningPathUrl = window.location.href;
+      chrome.storage.local.set({
+        learningPathActive: true,
+        lastLearningPathUrl: window.location.href
+      });
+    }
     chrome.storage.local.set({ bulkActive: true, focusMode, playbackSpeed: currentSpeed });
     addLog(`🚀 AutoPilot started (Focus Mode: ${focusMode}, Speed: ${currentSpeed}x)`, 'info');
     runAutonomousStep();

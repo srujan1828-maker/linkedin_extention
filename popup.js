@@ -11,6 +11,13 @@
  */
 
 document.addEventListener('DOMContentLoaded', () => {
+  const versionText = document.getElementById('versionText');
+  if (versionText) {
+    try {
+      versionText.innerText = 'v' + chrome.runtime.getManifest().version;
+    } catch (e) {}
+  }
+
   // ─── DOM References ─────────────────────────────────────────────────────────
 
   // Navigation Tabs
