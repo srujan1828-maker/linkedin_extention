@@ -1,7 +1,7 @@
 {
   "name": "LinkedIn Learning AI AutoPilot",
   "description": "Multi-provider AI quiz auto-solver, autonomous course completer with focus modes, and 16x video speed engine for LinkedIn Learning.",
-  "version": "10.7.0",
+  "version": "10.8.1",
   "manifest_version": 3,
   "icons": {
     "48": "icon.png",
@@ -17,7 +17,9 @@
   },
   "content_scripts": [
     {
-      "js": ["page-inject.js"],
+      "js": [
+        "page-inject.js"
+      ],
       "matches": [
         "https://www.linkedin.com/learning/*",
         "https://www.linkedin.com/learning-career-hub/*",
@@ -28,7 +30,9 @@
       "world": "MAIN"
     },
     {
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "matches": [
         "https://www.linkedin.com/learning/*",
         "https://www.linkedin.com/learning-career-hub/*",
@@ -53,8 +57,12 @@
   ],
   "web_accessible_resources": [
     {
-      "resources": ["page-inject.js"],
-      "matches": ["https://www.linkedin.com/*"]
+      "resources": [
+        "page-inject.js"
+      ],
+      "matches": [
+        "https://www.linkedin.com/*"
+      ]
     }
   ]
 }

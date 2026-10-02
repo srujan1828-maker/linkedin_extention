@@ -1,0 +1,356 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const fs = require('node:fs');
+const path = require('node:path');
+const source = name => fs.readFileSync(path.join(__dirname, '..', name), 'utf8');
+const noop = () => {};
+
+function speedEngine() {
+  class Media {
+    constructor() { this.rate = 1; this.readyState = 4; this.paused = true; this.muted = false; this.preservesPitch = true; }
+    get playbackRate() { return this.rate; }
+    set playbackRate(value) { this.rate = value; }
+    addEventListener() {}
+    play() { throw Error('Speed changes must not start playback'); }
+  }
+  const video = new Media();
+  const listeners = {};
+  const document = Object.create({ get hidden() { return true; }, get visibilityState() { return 'hidden'; } });
+  Object.assign(document, { querySelector: () => video, querySelectorAll: () => [video], addEventListener: noop });
+  const window = { addEventListener: (type, fn) => (listeners[type] ||= []).push(fn) };
+  vm.runInNewContext(source('page-inject.js'), { window, document, HTMLMediaElement: Media, console, setInterval: noop, setTimeout: noop });
+  const message = data => listeners.message.forEach(fn => fn({ source: window, data }));
+  return { video, document, window, message, listeners };
+}
+
+test('engine starts inactive and preserves sound and pause preferences at high rates', () => {
+  const e = speedEngine();
+  assert.equal(e.video.playbackRate, 1);
+  assert.equal(e.window.__liSpeedEngine.isEnabled(), false);
+  e.message({ type: 'LI_FORCE_SPEED', speed: 16, enabled: true });
+  assert.equal(e.video.playbackRate, 16);
+  assert.equal(e.window.__liSpeedEngine.getNativePlaybackRate(), 16);
+  assert.equal(e.video.muted, false);
+  assert.equal(e.video.preservesPitch, true);
+  assert.equal(e.video.paused, true);
+});
+
+test('fractional speeds work; disabling leaves native speed controls usable', () => {
+  const e = speedEngine();
+  e.message({ type: 'LI_FORCE_SPEED', speed: 0.5, enabled: true });
+  assert.equal(e.video.playbackRate, 0.5);
+  e.video.playbackRate = 2;
+  assert.equal(e.video.playbackRate, 0.5);
+  e.message({ type: 'LI_FORCE_SPEED', speed: 16, enabled: false });
+  assert.equal(e.video.playbackRate, 1);
+  e.video.playbackRate = 1.5;
+  assert.equal(e.video.playbackRate, 1.5);
+});
+
+test('background play follows the toggle and rejects messages from other windows', () => {
+  const e = speedEngine();
+  assert.equal(e.document.hidden, true);
+  e.listeners.message[0]({ source: {}, data: { type: 'LI_SET_BACKGROUND_PLAY', enabled: true } });
+  assert.equal(e.document.hidden, true);
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
+  assert.equal(e.document.hidden, false);
+  e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: false });
+  assert.equal(e.document.visibilityState, 'hidden');
+});
+
+async function content(saved) {
+  const messages = [], runtime = [], storage = [], timers = [];
+  let attached = 0;
+  const document = { body: {}, hidden: false, querySelector: () => null, querySelectorAll: () => [], addEventListener: noop };
+  const window = { location: { href: 'https://www.linkedin.com/learning/example/lesson', pathname: '/learning/example/lesson', origin: 'https://www.linkedin.com' }, addEventListener: noop, postMessage: m => messages.push(m) };
+  const chrome = {
+    runtime: { id: 'test', connect: () => ({ onDisconnect: { addListener: noop }, postMessage: noop }), onMessage: { addListener: fn => runtime.push(fn) }, sendMessage: noop },
+    storage: { local: { get: async () => saved, set: async data => Object.assign(saved, data) }, onChanged: { addListener: fn => storage.push(fn) } }
+  };
+  const ctx = vm.createContext({ window, document, chrome, console, AbortController, URL, URLSearchParams, setInterval: noop, clearInterval: noop, setTimeout: fn => { timers.push(fn); return timers.length; }, clearTimeout: noop, MutationObserver: class { constructor() { attached++; } observe() {} } });
+  vm.runInContext(source('content.js'), ctx);
+  assert.equal(attached, 0, 'player observation must wait for saved settings');
+  await new Promise(resolve => setImmediate(resolve));
+  return { ctx, document, window, chrome, saved, messages, runtime, storage, timers, attached };
+}
+
+test('saved disabled preferences load before player observation and propagate live', async () => {
+  const c = await content({ speedInjection: false, playbackSpeed: 0.75, bgPlay: false, autoNavigate: false });
+  assert.equal(c.attached, 1);
+  assert.equal(vm.runInContext('speedInjectionEnabled', c.ctx), false);
+  assert.equal(vm.runInContext('backgroundRun', c.ctx), false);
+  assert.equal(vm.runInContext('autoNavigateEnabled', c.ctx), false);
+  c.runtime[0]({ action: 'setBgPlay', enabled: true }, {}, noop);
+  assert.equal(c.messages.at(-1).enabled, true);
+  c.runtime[0]({ action: 'setSpeedInjection', enabled: false }, {}, noop);
+  assert.equal(c.messages.at(-2).enabled, false);
+  c.storage[0]({ playbackSpeed: { newValue: 3 }, speedInjection: { newValue: true } }, 'local');
+  assert.equal(c.messages.at(-2).speed, 3);
+  assert.equal(c.messages.at(-2).enabled, true);
+});
+
+test('speed changes do not resume paused media or alter mute preferences', async () => {
+  const c = await content({ playbackSpeed: 2 });
+  const video = { muted: true, paused: true, playbackRate: 1, play: () => { throw Error('Unexpected play'); } };
+  c.ctx.fixture = video;
+  vm.runInContext('applySpeed(fixture, 4)', c.ctx);
+  assert.equal(video.muted, true);
+  assert.equal(video.playbackRate, 4);
+});
+
+test('stop prevents delayed bulk lesson navigation', async () => {
+  const c = await content({ bulkActive: false });
+  vm.runInContext('isBulkActive = true', c.ctx);
+  const pending = vm.runInContext("handleVideoEnded('/learning/example/lesson', 0)", c.ctx);
+  c.runtime[0]({ action: 'stopBulkComplete' }, {}, noop);
+  let navigations = 0;
+  c.ctx.trackNavigation = () => navigations++;
+  vm.runInContext('expandAllSections = trackNavigation', c.ctx);
+  c.timers.at(-1)();
+  await pending;
+  assert.equal(navigations, 0);
+});
+
+test('AI requests deduplicate identical prompts without sharing unrelated answers', async () => {
+  const ctx = vm.createContext({ chrome: { runtime: { onMessage: { addListener: noop }, onConnect: { addListener: noop } } }, console });
+  vm.runInContext(source('background.js'), ctx);
+  const calls = [];
+  ctx.request = req => new Promise(resolve => calls.push({ req, resolve }));
+  vm.runInContext('executeAIRequest = request', ctx);
+  const a = vm.runInContext("handleAIRequest({ prompt: 'A' })", ctx);
+  const b = vm.runInContext("handleAIRequest({ prompt: 'B' })", ctx);
+  const a2 = vm.runInContext("handleAIRequest({ prompt: 'A' })", ctx);
+  assert.equal(calls.length, 2);
+  calls[0].resolve({ text: 'answer A' });
+  calls[1].resolve({ text: 'answer B' });
+  assert.equal((await a).text, 'answer A');
+  assert.equal((await b).text, 'answer B');
+  assert.equal((await a2).text, 'answer A');
+  assert.equal(vm.runInContext('activeAIRequests.size', ctx), 0);
+});
+
+
+test('answer mapping rejects missing, partial, out-of-range and conflicting answers', async () => {
+  const c = await content({});
+  c.ctx.options = [{ text: 'Increase focus' }, { text: 'Increase focus gradually' }, { text: 'Take breaks' }];
+  for (const answer of [{}, { answerTexts: ['Increase'] }, { answerIndices: [7] },
+    { answerIndices: [1], answerTexts: ['Take breaks'] }, { error: true, answerIndices: [0] }]) {
+    c.ctx.answer = answer;
+    assert.equal(vm.runInContext('matchAnswerIndices(options, answer).length', c.ctx), 0);
+  }
+  c.ctx.answer = { answerIndices: [2], answerTexts: ['Take breaks'] };
+  assert.equal(vm.runInContext('resolveSingleChoiceOption(options, answer).index', c.ctx), 2);
+  c.ctx.answer = { answerIndices: [0, 2], answerTexts: ['Increase focus', 'Take breaks'] };
+  assert.equal(vm.runInContext('resolveAnswerIndices({type:"checkbox", options}, answer).length', c.ctx), 2);
+  assert.equal(vm.runInContext('resolveSingleChoiceOption(options, answer).index', c.ctx), -1);
+});
+
+test('AI provider failures and malformed responses never fall back to option zero', async () => {
+  const c = await content({});
+  c.ctx.q = { prompt: 'Which action helps focus?', type: 'radio', options: [{ text: 'A' }, { text: 'B' }] };
+  for (const response of [{ success: false, error: 'Invalid key' }, { success: true, text: 'Maybe A' },
+    { success: true, text: '{"answerIndices":[99]}' }]) {
+    c.chrome.runtime.sendMessage = (_req, cb) => cb(response);
+    await assert.rejects(vm.runInContext('askAIForQuestion(q)', c.ctx));
+  }
+});
+
+test('checkbox selection clicks once and does not toggle an already selected answer', async () => {
+  const c = await content({});
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  let clicks = 0;
+  const input = { checked: false, tagName: 'INPUT', closest: () => null, click() { clicks++; this.checked = !this.checked; } };
+  c.ctx.option = { input };
+  assert.equal(await vm.runInContext('selectOption(option, true)', c.ctx), true);
+  assert.equal(await vm.runInContext('selectOption(option, true)', c.ctx), true);
+  assert.equal(clicks, 1);
+  assert.equal(await vm.runInContext('selectOption(option, false)', c.ctx), true);
+  assert.equal(input.checked, false);
+  assert.equal(clicks, 2);
+});
+
+test('current chapter quiz parser ignores unrelated page inputs', async () => {
+  const c = await content({});
+  const cards = ['First option', 'Second option'].map(text => ({ querySelector(selector) {
+    if (selector.startsWith('input')) return { type: 'radio' };
+    if (selector === '.exam-option__label-text') return { innerText: text };
+    return {};
+  } }));
+  const group = { getClientRects: () => [1], querySelector: () => ({ innerText: 'What is the next step?' }),
+    querySelectorAll: () => cards, closest: () => ({ innerText: 'Question 2 of 4' }) };
+  c.document.querySelectorAll = selector => selector === '.chapter-quiz-question' ? [group] : [];
+  const q = vm.runInContext('parseCurrentQuizQuestion()', c.ctx);
+  assert.equal(q.prompt, 'What is the next step?');
+  assert.equal(q.counter, 'Question 2 of 4');
+  assert.equal(q.type, 'radio');
+  assert.deepEqual(Array.from(q.options, o => o.text), ['First option', 'Second option']);
+  c.document.querySelectorAll = () => [group, group];
+  assert.equal(vm.runInContext('parseCurrentQuizQuestion()', c.ctx), null);
+});
+
+test('empty native Viewed marker counts as completed', async () => {
+  const c = await content({});
+  const row = { closest: () => null, querySelectorAll: () => [],
+    querySelector: () => ({ hasAttribute: attr => attr === 'data-live-test-classroom-toc-item-completed' }) };
+  c.ctx.row = row;
+  assert.equal(vm.runInContext('isLessonCompleted(row)', c.ctx), true);
+});
+
+test('path discovery reads whole cards, deduplicates titles and retains standalone context', async () => {
+  const c = await content({});
+  const link = (href, text) => ({ getAttribute: () => href, textContent: text });
+  const card = (href, text, completed) => ({ completed, querySelector: selector => selector.startsWith('h3') ? link(href, text) : { innerText: 'Video' } });
+  const first = card('/learning/course/video?standalone=true&contextUrn=path&u=123', 'Standalone lesson', true);
+  const second = card('/learning/another-course?contextUrn=path&u=123', 'Second course', false);
+  second.querySelector = selector => selector.startsWith('h3') ? link('/learning/another-course?contextUrn=path&u=123', 'Second course') : { innerText: 'Course' };
+  c.document.querySelectorAll = () => [first, first, second];
+  vm.runInContext('isPathItemCompleted = card => card.completed', c.ctx);
+  const items = vm.runInContext('getLearningPathItems()', c.ctx);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].type, 'video');
+  assert.equal(items[0].completed, true);
+  assert.equal(new URL(items[0].fullHref).searchParams.get('contextUrn'), 'path');
+  assert.equal(items[1].type, 'course');
+  assert.equal(items[1].completed, false);
+});
+
+test('course links retain learning path and organization context', async () => {
+  const c = await content({});
+  c.window.location.href = 'https://www.linkedin.com/learning/example/current?contextUrn=path&u=123';
+  const url = new URL(vm.runInContext('preserveLearningContext("/learning/example/next?resume=false")', c.ctx));
+  assert.equal(url.searchParams.get('contextUrn'), 'path');
+  assert.equal(url.searchParams.get('u'), '123');
+  assert.equal(url.searchParams.get('resume'), 'false');
+});
+
+test('path queue persists progress and advances only from its current path', async () => {
+  const paths = ['one', 'two'].map(name => ({ title: name, url: 'https://www.linkedin.com/learning/paths/' + name, completed: false }));
+  const c = await content({ pathQueueActive: true, pathQueue: paths, pathQueueIndex: 0 });
+  vm.runInContext('isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('advancePathQueue()', c.ctx), false);
+  c.window.location.pathname = '/learning/paths/one';
+  assert.equal(await vm.runInContext('advancePathQueue()', c.ctx), true);
+  assert.equal(c.saved.pathQueueIndex, 1);
+  assert.equal(paths[0].completed, true);
+  assert.equal(c.window.location.href, paths[1].url);
+  c.window.location.pathname = '/learning/paths/two';
+  assert.equal(await vm.runInContext('advancePathQueue()', c.ctx), false);
+  assert.equal(c.saved.pathQueueActive, false);
+  assert.equal(paths[1].completed, true);
+});
+
+test('quiz verification requires the current quiz and rejects generic results headings', async () => {
+  const c = await content({});
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  c.ctx.fixture = [{ href: '/learning/example/quiz/old', completed: true }];
+  vm.runInContext('getCourseSyllabus = () => fixture; expandAllSections = () => {}', c.ctx);
+  c.window.location.pathname = '/learning/example/quiz/current';
+  c.document.querySelector = selector => selector.includes('.chapter-quiz') ? { innerText: 'Results. Keep practicing.' } : null;
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(5)', c.ctx), false);
+  c.ctx.fixture.push({ href: c.window.location.pathname, completed: true });
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(5)', c.ctx), true);
+});
+
+test('library discovery expands pagination and queues only unique path headings', async () => {
+  const c = await content({});
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  vm.runInContext('isElementClickable = () => true', c.ctx);
+  let expanded = false;
+  const link = name => ({ textContent: name, getAttribute: () => '/learning/paths/' + name + '?u=123' });
+  const one = link('one'), two = link('two');
+  const more = { getAttribute: () => 'Show more in progress content', click: () => { expanded = true; } };
+  c.document.querySelectorAll = selector => {
+    if (selector === 'main button') return expanded ? [] : [more];
+    if (selector === 'main h3 a') return expanded ? [one, one, two] : [one];
+    if (selector === 'main h3 a[href*="/learning/paths/"]') return expanded ? [one, one, two] : [one];
+    return [];
+  };
+  const result = await vm.runInContext('startAllPaths()', c.ctx);
+  assert.equal(expanded, true);
+  assert.equal(result.totalPaths, 2);
+  assert.equal(c.saved.pathQueueActive, true);
+  assert.equal(c.saved.bulkActive, true);
+  assert.equal(c.saved.focusMode, 'pending_only');
+  assert.equal(c.window.location.href, 'https://www.linkedin.com/learning/paths/one?u=123');
+});
+
+test('path completion requires explicit status, not a green progress bar or 100%', async () => {
+  const c = await content({});
+  c.ctx.card = { innerText: 'Course\nTitle\n100%\nCompleted 10/2/2026' };
+  assert.equal(vm.runInContext('isPathItemCompleted(card)', c.ctx), true);
+  c.ctx.card.innerText = 'Course\nCompleted Projects\n100%';
+  assert.equal(vm.runInContext('isPathItemCompleted(card)', c.ctx), false);
+});
+
+test('ordinary autoplay returns to the saved path without bulk mode', async () => {
+  const url = 'https://www.linkedin.com/learning/paths/original?u=123';
+  const c = await content({ lastLearningPathUrl: url, bulkActive: false });
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), false);
+  assert.equal(await vm.runInContext('returnToLearningPath({allowAutoplay:true})', c.ctx), true);
+  assert.equal(c.window.location.href, url);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), false);
+});
+
+test('a hidden explicit back link supplies the path destination', async () => {
+  const c = await content({});
+  const href = '/learning/paths/hidden-path?u=123';
+  const back = { innerText: 'BACK TO LEARNING PATH', getAttribute: name => name === 'href' ? href : '', closest: () => null };
+  c.document.querySelectorAll = selector => selector === 'a[href]' ? [back] : [];
+  vm.runInContext('isElementClickable = () => false; isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), true);
+  assert.equal(c.window.location.href, 'https://www.linkedin.com' + href);
+});
+
+test('return prefers the active queue and skips invalid saved destinations', async () => {
+  const queued = 'https://www.linkedin.com/learning/paths/queued?u=123';
+  const c = await content({ lastLearningPathUrl: 'https://example.com/learning/paths/wrong', pathQueueActive: true,
+    pathQueueIndex: 1, pathQueue: [{url:'https://www.linkedin.com/learning/paths/old'}, {url:queued}] });
+  vm.runInContext('isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), true);
+  assert.equal(c.window.location.href, queued);
+  const d = await content({ lastLearningPathUrl: 'https://example.com/learning/paths/wrong' });
+  d.document.referrer = 'https://www.linkedin.com/learning/paths/referrer?u=123';
+  vm.runInContext('isBulkActive = true', d.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', d.ctx), true);
+  assert.equal(d.window.location.href, d.document.referrer);
+});
+
+test('Stop cancels return while storage is being read', async () => {
+  const c = await content({});
+  vm.runInContext('isBulkActive = true', c.ctx);
+  let resolveRead;
+  c.chrome.storage.local.get = () => new Promise(resolve => { resolveRead = resolve; });
+  const original = c.window.location.href;
+  const pending = vm.runInContext('returnToLearningPath()', c.ctx);
+  vm.runInContext('quizRunEpoch++; isBulkActive = false', c.ctx);
+  resolveRead({ lastLearningPathUrl: 'https://www.linkedin.com/learning/paths/original' });
+  assert.equal(await pending, false);
+  assert.equal(c.window.location.href, original);
+});
+
+test('final exam presence does not block the return to the path', async () => {
+  const url = 'https://www.linkedin.com/learning/paths/original';
+  const c = await content({ lastLearningPathUrl: url });
+  const exam = { closest: () => null };
+  c.document.querySelector = selector => selector.includes('/learning/exams/summative/') ? exam : null;
+  vm.runInContext('isLessonCompleted = () => false; isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('finishCourseAndReturnToPath()', c.ctx), true);
+  assert.equal(c.window.location.href, url);
+  assert.equal(c.saved.bulkActive, undefined, 'bulk is not stopped on the course page');
+  assert.equal(c.saved.pathExamNotice.courseSlug, 'example');
+  assert.equal(c.saved.pathExamNotice.pathUrl, url);
+});
+
+test('return respects disabled navigation and cancels old lesson fallbacks', async () => {
+  const url = 'https://www.linkedin.com/learning/paths/original';
+  const c = await content({ lastLearningPathUrl: url, autoNavigate: false });
+  vm.runInContext('isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), false);
+  let cancelled;
+  c.ctx.clearTimeout = id => { cancelled = id; };
+  vm.runInContext('autoNavigateEnabled = true; navWatchdogTimer = 42', c.ctx);
+  assert.equal(await vm.runInContext('returnToLearningPath()', c.ctx), true);
+  assert.equal(cancelled, 42);
+  assert.equal(vm.runInContext('navWatchdogTimer', c.ctx), null);
+});

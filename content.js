@@ -20,18 +20,21 @@
 let currentSpeed = 16;
 let autoplayEnabled = true;
 let backgroundRun = true;
+let speedInjectionEnabled = true;
+let autoNavigateEnabled = true;
 let skipNonVideos = true;
 let autoSolveQuizzes = true;
 let focusMode = 'pending_only';
 let strictCompletionEnabled = true;
 let isBulkActive = false;
 let isSolvingQuiz = false;
+let quizRunEpoch = 0;
+let quizError = null;
 let videoEl = null;
 let watchdogInterval = null;
 let lastRecordedTime = -1;
 let stuckCount = 0;
 let lastRateChangeTime = 0;
-let previousMuteState = false;
 let keepalivePort = null;
 let keepaliveAudioCtx = null;
 let nonVideoTimer = null;
@@ -95,14 +98,46 @@ function startAudioKeepalive() {
 let cachedCourseSlug = null;
 
 function getCourseSlug() {
-  const path = window.location.pathname;
-  const match = path.match(/\/(?:learning|learning-career-hub|career-hub)\/([^/]+)/);
-  if (match && match[1] !== 'paths' && match[1] !== 'learning-paths' && match[1] !== 'search' && match[1] !== 'me') {
-    cachedCourseSlug = match[1];
-    try { chrome.storage.local.set({ lastCourseSlug: cachedCourseSlug }); } catch (e) {}
-    return cachedCourseSlug;
-  }
+  const match = window.location.pathname.match(/^\/(?:learning|learning-career-hub|career-hub)\/([^/]+)/);
+  const reserved = new Set(['paths', 'learning-paths', 'search', 'me', 'home', 'browse', 'exams', 'career-paths', 'career-journey', 'topics', 'instructors']);
+  cachedCourseSlug = match && !reserved.has(match[1]) ? match[1] : null;
   return cachedCourseSlug;
+}
+
+function preserveLearningContext(rawHref) {
+  const target = new URL(rawHref, window.location.href);
+  const current = new URL(window.location.href);
+  if (target.origin !== current.origin) throw new Error('Refusing navigation outside LinkedIn');
+  for (const key of ['contextUrn', 'u']) {
+    if (!target.searchParams.has(key) && current.searchParams.has(key)) {
+      target.searchParams.set(key, current.searchParams.get(key));
+    }
+  }
+  return target.href;
+}
+
+function validLearningPathUrl(raw) {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw, window.location.href);
+    return url.origin === window.location.origin &&
+      /^\/learning\/(?:paths|learning-paths)\/[^/]+\/?$/.test(url.pathname) ? url.href : null;
+  } catch (e) { return null; }
+}
+
+function rememberLearningPath() {
+  const current = validLearningPathUrl(window.location.href);
+  const back = findBackToLearningPathButton();
+  const url = current || validLearningPathUrl(back?.getAttribute('href') || back?.href) ||
+    validLearningPathUrl(lastLearningPathUrl) || validLearningPathUrl(document.referrer);
+  if (!url || url === lastLearningPathUrl) return;
+  learningPathActive = true;
+  lastLearningPathUrl = url;
+  chrome.storage.local.set({ learningPathActive: true, lastLearningPathUrl: url });
+}
+
+function isStandalonePathVideo() {
+  return new URL(window.location.href).searchParams.get('standalone') === 'true';
 }
 
 function isLanguageElement(el) {
@@ -123,7 +158,7 @@ function isLanguageElement(el) {
 }
 
 function expandAllSections() {
-  const sidebar = document.querySelector('#course-contents, [class*="classroom-toc"], ul.classroom-toc');
+  const sidebar = document.querySelector('.classroom-layout-sidebar-body, .classroom-layout__sidebar-body, .classroom-body__sidebar-body, #course-contents, .classroom-toc');
   if (!sidebar) return;
   const collapsedButtons = sidebar.querySelectorAll(
     'li.classroom-toc-section button[aria-expanded="false"], .classroom-toc-chapter button[aria-expanded="false"], button.classroom-toc-section__toggle[aria-expanded="false"]'
@@ -150,10 +185,13 @@ function isLessonCompleted(container) {
     return false;
   };
 
+  const lessonLink = fullRow.querySelector('a.classroom-toc-item__link');
+  if (lessonLink?.hasAttribute('data-live-test-classroom-toc-item-completed')) return true;
+
   // 1. Text checks (Multilingual: EN, ID, ES, FR, DE)
   const text = ((container.innerText || '') + ' ' + (fullRow.innerText || '')).toLowerCase();
-  const completionRegex = /\b(?:completed|watched|passed|quiz passed|selesai|lulus|ditonton|completado|visto|aprobado|terminé|réussi|abgeschlossen|bestanden)\b/i;
-  const negativeRegex = /\b(?:not completed|unwatched|not started|belum selesai|belum dimulai|no completado|non terminé)\b/i;
+  const completionRegex = /\b(?:completed|watched|viewed|passed|quiz passed|selesai|lulus|ditonton|completado|visto|aprobado|terminé|réussi|abgeschlossen|bestanden)\b/i;
+  const negativeRegex = /\b(?:not completed|not viewed|unwatched|not started|belum selesai|belum dimulai|no completado|non terminé)\b/i;
 
   if (completionRegex.test(text) && !negativeRegex.test(text)) {
     return true;
@@ -249,7 +287,7 @@ function getCourseSyllabus() {
 
   expandAllSections();
 
-  const sidebar = document.querySelector('#course-contents, [class*="classroom-toc"], ul.classroom-toc');
+  const sidebar = document.querySelector('.classroom-layout-sidebar-body, .classroom-layout__sidebar-body, .classroom-body__sidebar-body, #course-contents, .classroom-toc');
   let links = [];
   if (sidebar) {
     links = Array.from(sidebar.querySelectorAll('a')).filter((a) => {
@@ -257,7 +295,7 @@ function getCourseSyllabus() {
       return h && !h.startsWith('#') && !h.includes('/search') && !a.closest('header, nav[aria-label="Primary" i]');
     });
   }
-  if (links.length === 0) {
+  if (!sidebar && links.length === 0) {
     links = Array.from(document.querySelectorAll(
       `a[href*="/learning/${courseSlug}/"], a[href*="/learning-career-hub/${courseSlug}/"], a[href*="/career-hub/${courseSlug}/"]`
     ));
@@ -267,7 +305,12 @@ function getCourseSyllabus() {
 
   for (const a of links) {
     const rawHref = a.getAttribute('href') || a.href;
-    const cleanHref = rawHref.split('?')[0].split('#')[0];
+    let lessonUrl;
+    try { lessonUrl = new URL(rawHref, window.location.href); } catch (e) { continue; }
+    const cleanHref = lessonUrl.pathname;
+    if (!cleanHref.startsWith(`/learning/${courseSlug}/`) &&
+        !cleanHref.startsWith(`/learning-career-hub/${courseSlug}/`) &&
+        !cleanHref.startsWith(`/career-hub/${courseSlug}/`)) continue;
 
     if (cleanHref.endsWith(`/learning/${courseSlug}`) || cleanHref.endsWith(`/learning/${courseSlug}/`)) {
       continue;
@@ -300,7 +343,7 @@ function getCourseSyllabus() {
         element: a,
         rowContainer,
         href: cleanHref,
-        fullHref: rawHref,
+        fullHref: preserveLearningContext(rawHref),
         title,
         completed,
         isQuiz,
@@ -356,10 +399,7 @@ function isLearningPathPage() {
   if (!isPathUrl) return false;
 
   // If there's a course syllabus sidebar, we're inside a course
-  if (document.querySelector('#course-contents, [class*="classroom-toc"], ul.classroom-toc')) return false;
-
-  // On paths pages, pause any preview/hero videos immediately
-  pauseLearningPathVideos();
+  if (document.querySelector('.classroom-layout-sidebar-body, .classroom-layout__sidebar-body, .classroom-body__sidebar-body, #course-contents, .classroom-toc')) return false;
 
   return true;
 }
@@ -374,7 +414,7 @@ function isGlobalNavPage() {
 
   // If on a path overview page or inside an active course player, it's NOT an off-track global nav page
   if (path.includes('/paths/') || href.includes('/paths/') || path.includes('/learning-paths/') || href.includes('/learning-paths/')) return false;
-  if (document.querySelector('#course-contents, [class*="classroom-toc"], ul.classroom-toc')) return false;
+  if (document.querySelector('.classroom-layout-sidebar-body, .classroom-layout__sidebar-body, .classroom-body__sidebar-body, #course-contents, .classroom-toc')) return false;
 
   // Known off-track routes that the extension should escape from back to the Learning Path
   if (
@@ -406,80 +446,12 @@ function isGlobalNavPage() {
  * Strict verification: Must explicitly state "Completed" (e.g. "Completed 6/4/2026")
  * or have an explicit checkmark badge. Does NOT treat unfinished progress bars as completed.
  */
-function isPathItemCompleted(container) {
-  if (!container) return false;
-
-  const cardText = (container.innerText || '').toLowerCase();
-  const cardAria = Array.from(container.querySelectorAll('[aria-label]'))
-    .map((el) => (el.getAttribute('aria-label') || '').toLowerCase())
-    .join(' ');
-  const combined = cardText + ' ' + cardAria;
-
-  // Negative checks: if it says "left", "remaining", or "incomplete", it's NOT completed
-  if (/\b(?:\d+m?\s*\d*s?\s*left|\d+\s*left|remaining|incomplete|belum selesai|sisa)\b/i.test(combined)) {
-    return false;
-  }
-
-  // 1. Explicit "Completed" text (e.g. "Completed 6/4/2026", "Completed", "Selesai")
-  const completionRegex = /\b(?:completed\b(?:\s+\d+[\/\-]\d+[\/\-]\d+)?|selesai\b|completado\b|terminé\b|abgeschlossen\b)/i;
-  const negativeRegex = /\b(?:not completed|belum selesai|no completado|non terminé)\b/i;
-
-  if (completionRegex.test(combined) && !negativeRegex.test(combined)) {
-    return true;
-  }
-
-  // If it has duration / progress text (e.g. "41m 55s", "54m 4s left", "1h 3m") and NO "completed" text, it is NOT completed
-  if (!completionRegex.test(combined) && /\b\d+\s*(?:m|min|mnt|h|hr|j|s|sec|dtk)\b/i.test(cardText)) {
-    return false;
-  }
-
-  // 2. SVG checkmark icon / badge explicitly inside a completion badge or status tag
-  const checkBadges = container.querySelectorAll(
-    '[class*="completed"], [class*="status--completed"], [class*="badge--completed"], li-icon[type*="check"], [data-test-icon*="check"]'
-  );
-  for (const b of checkBadges) {
-    const bText = (b.innerText || b.getAttribute('aria-label') || '').toLowerCase();
-    if (!/bookmark/i.test(bText)) return true;
-  }
-
-  // 3. SVG with checkmark that is NOT a bookmark or bullet
-  const svgs = container.querySelectorAll('svg');
-  for (const svg of svgs) {
-    const iconName = (
-      svg.getAttribute('data-test-icon') ||
-      svg.getAttribute('name') ||
-      svg.getAttribute('aria-label') ||
-      svg.getAttribute('type') ||
-      ''
-    ).toLowerCase();
-    if (iconName.includes('bookmark') || iconName.includes('bullet') || iconName.includes('circle')) continue;
-    if (iconName.includes('check') || iconName.includes('completed') || iconName.includes('success')) {
-      return true;
-    }
-
-    try {
-      const stroke = (svg.getAttribute('stroke') || '').toLowerCase();
-      const fill = (svg.getAttribute('fill') || '').toLowerCase();
-      const style = window.getComputedStyle(svg);
-      const color = (style.color || '').toLowerCase();
-      const cssFill = (style.fill || '').toLowerCase();
-      const cssStroke = (style.stroke || '').toLowerCase();
-
-      const isGreen = (val) =>
-        /green|#10b981|#059669|#12884a|#00732f|#057642|#107c41|signal-positive|rgb\(1[0-9],|rgb\(0,\s*1[0-9]|rgb\(5,\s*118|rgb\(16,\s*124|rgb\(18,\s*136/i.test(val);
-
-      if (isGreen(stroke) || isGreen(fill) || isGreen(color) || isGreen(cssFill) || isGreen(cssStroke)) {
-        return true;
-      }
-    } catch (e) {}
-  }
-
-  // 4. Delegate to general lesson completed checker
-  if (isLessonCompleted(container)) {
-    return true;
-  }
-
-  return false;
+function isPathItemCompleted(card) {
+  if (!card) return false;
+  const text = (card.innerText || '').trim();
+  if (/\b(?:not completed|incomplete|remaining)\b/i.test(text)) return false;
+  // Use LinkedIn's status on the whole card; progress colors and 100% alone are insufficient.
+  return /(?:^|\n)\s*(?:completed|selesai|completado|terminé|abgeschlossen)(?:\s+\d+[/-]\d+[/-]\d+)?\s*(?:\n|$)/i.test(text);
 }
 
 /**
@@ -487,224 +459,45 @@ function isPathItemCompleted(container) {
  * Returns array of { title, href, card, completed, type }
  */
 function getLearningPathItems() {
-  const items = [];
-  const seen = new Set();
-  const currentPathClean = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
-
-  // Strict list of site navigation / sidebar labels to IGNORE
-  const siteNavFilter = /^(?:home|browse|certif.*|career paths?|my career plan|my content|ai coaching|ai role play|hands-on tech|featured.*|human skills|data analysis|help|save|share|add to.*|beranda|resume|start)$/i;
-
-  // Specific blacklist for navigation routes (not courses)
-  const navBlacklist = /\/(?:home|browse|certif[a-z]*|career-paths|my-career-plan|my-content|paths|learning-paths|search|me|saved|topics|instructors|providers|organizations|help|feedback)\b/i;
-
-  // Find all candidate course links across the document
-  const rawLinks = Array.from(document.querySelectorAll(
-    'a[href*="/learning/"], a[href*="/learning-career-hub/"], a[href*="/career-hub/"]'
+  const cards = Array.from(document.querySelectorAll(
+    'main .path-body-v2__item-card, main .path-card, main [class*="learning-path__item"], main [class*="learning-path-item"]'
   ));
-
-  const links = rawLinks.filter((a) => {
-    // 1. Reject any link inside site navigation, left-rail sidebar, header, footer
-    if (a.closest('nav, aside, header, footer, [role="navigation"], .global-nav, .side-nav, .nav-rail, .left-rail, [data-control-name*="nav"]')) {
-      return false;
-    }
-
-    const rawHref = (a.getAttribute('href') || a.href || '').trim();
-    const cleanHref = rawHref.split('?')[0].split('#')[0].toLowerCase();
-
-    // 2. Must be on /learning/, /learning-career-hub/, or /career-hub/
-    const isLearningUrl = cleanHref.includes('/learning/') || cleanHref.includes('/learning-career-hub/') || cleanHref.includes('/career-hub/');
-    if (!isLearningUrl) return false;
-
-    // 3. Reject site-wide navigation routes
-    if (
-      cleanHref.endsWith('/learning') ||
-      cleanHref.endsWith('/learning/') ||
-      cleanHref.endsWith('/learning-career-hub') ||
-      cleanHref.endsWith('/learning-career-hub/') ||
-      cleanHref.endsWith('/career-hub') ||
-      cleanHref.endsWith('/career-hub/') ||
-      navBlacklist.test(cleanHref)
-    ) {
-      return false;
-    }
-
-    // 4. Must not be the current path URL itself
-    if (cleanHref === currentPathClean) return false;
-
-    // 5. Check link text against navigation items
-    const text = (a.innerText || '').trim();
-    if (text.length > 0 && siteNavFilter.test(text)) return false;
-
-    return true;
+  const seen = new Set();
+  return cards.flatMap(card => {
+    const link = card.querySelector('h3 a[href*="/learning/"], h4 a[href*="/learning/"]');
+    if (!link) return [];
+    let url;
+    try { url = new URL(link.getAttribute('href') || link.href, window.location.href); } catch (e) { return []; }
+    if (url.origin !== window.location.origin || !/^\/learning\/[^/]+/.test(url.pathname)) return [];
+    if (/^\/learning\/(paths|topics|instructors|search|me)\//.test(url.pathname)) return [];
+    if (seen.has(url.pathname)) return [];
+    seen.add(url.pathname);
+    const header = card.querySelector('.lls-card-detail-card-body__header');
+    const type = url.searchParams.get('standalone') === 'true' || /(?:^|\n)Video(?:\n|$)/i.test(header?.innerText || '') ? 'video' : 'course';
+    return [{ element: link, card, href: url.pathname, fullHref: url.href,
+      title: (link.textContent || link.innerText || '').trim(), completed: isPathItemCompleted(card), type }];
   });
-
-  for (const a of links) {
-    const rawHref = (a.getAttribute('href') || a.href || '').trim();
-    const hrefClean = rawHref.split('?')[0].split('#')[0].toLowerCase();
-
-    if (seen.has(hrefClean)) continue;
-
-    // Find the course card container (search upwards from link)
-    let card = a.closest('li, article, [class*="learning-path-item"], [class*="learning-path__item"], [class*="path-course"], [class*="entity-lockup"], [class*="card"]');
-    if (!card) {
-      let curr = a.parentElement;
-      for (let depth = 0; depth < 4 && curr && curr !== document.body && curr.tagName !== 'SECTION' && curr.tagName !== 'MAIN'; depth++) {
-        if (curr.querySelectorAll('a[href*="/learning"], a[href*="/career-hub"]').length <= 3) {
-          card = curr;
-        }
-        curr = curr.parentElement;
-      }
-    }
-    if (!card) card = a.parentElement || a;
-
-    const cardText = (card.innerText || '').toLowerCase();
-    // Exclude if card is solely a certificate or credential
-    if (/certif|sertifikat|\bcerts?\b|credential|badge/i.test(cardText) && !/\b(?:course|video|kursus)\b/i.test(cardText)) {
-      continue;
-    }
-
-    // Extract title: prefer link text, then card heading, then URL slug
-    let title = (a.innerText || '').trim().replace(/\s+/g, ' ');
-    title = title.replace(/^(?:course|kursus|cours|curso)\s+/i, '').trim();
-
-    if (title.length < 3 || /^(?:view|watch|open|play|details?)$/i.test(title)) {
-      const heading = card.querySelector('h3, h4, h2, [class*="title"], [class*="headline"], strong');
-      if (heading) {
-        const ht = (heading.innerText || '').trim().replace(/\s+/g, ' ');
-        if (ht.length >= 3 && !siteNavFilter.test(ht) && !/^unit\s*\d+/i.test(ht) && !/content in this/i.test(ht)) {
-          title = ht.replace(/^(?:course|kursus|cours|curso)\s+/i, '').trim();
-        }
-      }
-    }
-
-    if (title.length < 3 || siteNavFilter.test(title) || /^unit\s*\d+/i.test(title)) {
-      const slug = hrefClean.split('/').filter(Boolean).pop() || '';
-      title = slug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-    }
-
-    if (title.length < 3) continue;
-
-    seen.add(hrefClean);
-
-    const type = /\bvideo\b/i.test(cardText) && !/\bcourse\b/i.test(cardText) ? 'video' : 'course';
-    const completed = isPathItemCompleted(card);
-
-    items.push({
-      element: a,
-      card,
-      href: hrefClean,
-      fullHref: a.href || rawHref,
-      title,
-      completed,
-      type
-    });
-  }
-
-  // Strategy 2: If no items found, inspect card elements directly in DOM
-  if (items.length === 0) {
-    const cards = Array.from(document.querySelectorAll(
-      'li[class*="learning-path"], li[class*="item"], [data-test-learning-path-item], [data-test-path-item], [class*="path-course"], article, [class*="entity-lockup"]'
-    )).filter((c) => {
-      if (c.closest('nav, aside, header, footer, [role="navigation"], .global-nav, .side-nav, .nav-rail, .left-rail')) return false;
-      const t = (c.innerText || '').trim();
-      return t.length > 10 && /\b(?:course|video|kursus)\b/i.test(t);
-    });
-
-    for (const card of cards) {
-      const a = card.querySelector('a[href*="/learning/"], a[href*="/learning-career-hub/"], a[href*="/career-hub/"]');
-      if (!a) continue;
-      const rawHref = (a.getAttribute('href') || a.href || '').trim();
-      const hrefClean = rawHref.split('?')[0].split('#')[0].toLowerCase();
-      if (!hrefClean || seen.has(hrefClean) || hrefClean === currentPathClean) continue;
-      if (navBlacklist.test(hrefClean)) continue;
-
-      let title = (a.innerText || '').trim().replace(/\s+/g, ' ');
-      title = title.replace(/^(?:course|kursus|cours|curso)\s+/i, '').trim();
-      if (title.length < 3 || siteNavFilter.test(title)) {
-        const titleEl = card.querySelector('h2, h3, h4, [class*="title"], [class*="headline"]');
-        if (titleEl) {
-          title = (titleEl.innerText || '').trim().replace(/\s+/g, ' ');
-          title = title.replace(/^(?:course|kursus|cours|curso)\s+/i, '').trim();
-        }
-      }
-      if (title.length < 3 || siteNavFilter.test(title)) {
-        const slug = hrefClean.split('/').filter(Boolean).pop() || '';
-        title = slug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-      }
-      if (title.length < 3) continue;
-
-      seen.add(hrefClean);
-      const completed = isPathItemCompleted(card);
-      items.push({
-        element: a,
-        card,
-        href: hrefClean,
-        fullHref: a.href || rawHref,
-        title,
-        completed,
-        type: /\bvideo\b/i.test(card.innerText) && !/\bcourse\b/i.test(card.innerText) ? 'video' : 'course'
-      });
-    }
-  }
-
-  return items;
 }
 
-/**
- * Finds the "BACK TO LEARNING PATH" button/link inside a course player page.
- */
 function findBackToLearningPathButton() {
-  // Check for explicit back-to-path links
-  const allClickable = Array.from(document.querySelectorAll('a, button, [role="button"]'));
-  for (const el of allClickable) {
-    if (isLanguageElement(el)) continue;
-    const text = (el.innerText || el.textContent || '').trim().toLowerCase();
-    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-    const href = (el.getAttribute('href') || el.href || '').toLowerCase();
-    const combined = text + ' ' + aria;
-
-    if (
-      /back to learning path|back to path|kembali ke jalur pembelajaran|kembali ke path/i.test(combined) ||
-      (href.includes('/learning/paths/') && (/back|kembali|←|↩/i.test(combined) || !text))
-    ) {
-      if (isElementClickable(el)) return el;
-    }
-  }
-
-  // Check sidebar top area for path return link
-  const sidebar = document.querySelector('#course-contents, [class*="classroom-toc"], aside, nav');
-  if (sidebar) {
-    const topLinks = sidebar.querySelectorAll('a[href*="/learning/paths/"], a');
-    for (const link of topLinks) {
-      const href = (link.getAttribute('href') || link.href || '').toLowerCase();
-      const text = (link.innerText || '').trim().toLowerCase();
-      if (href.includes('/learning/paths/') || (/back to|kembali ke|←|↩/i.test(text) && /path|jalur/i.test(text))) {
-        if (isElementClickable(link)) return link;
-      }
-    }
-  }
-
-  // Check for ANY link to /learning/paths/ anywhere in header/nav/main
-  const anyPathLink = document.querySelector('a[href*="/learning/paths/"], a[href*="/paths/"], a[href*="/learning-career-hub/paths/"]');
-  if (anyPathLink && isElementClickable(anyPathLink)) {
-    return anyPathLink;
-  }
-
-  return null;
+  // A hidden sidebar anchor still supplies a valid destination; no click is needed.
+  const links = Array.from(document.querySelectorAll('a[href]')).filter(link =>
+    validLearningPathUrl(link.getAttribute('href') || link.href));
+  const explicit = links.find(link => /back to (?:learning )?path|kembali ke (?:jalur|path)/i.test(
+    (link.innerText || link.textContent || '') + ' ' + (link.getAttribute('aria-label') || '')));
+  if (explicit) return explicit;
+  return links.find(link => link.closest('.classroom-layout-sidebar-body, .classroom-layout__sidebar-body, .classroom-body__sidebar-body, .classroom-toc-banner, #course-contents')) || null;
 }
 
-/**
- * Handles one step of Learning Path auto-navigation.
- * Called when we detect we're on a Learning Path overview page.
- * Finds the first uncompleted course and clicks into it.
- */
 async function handleLearningPathStep() {
+  if (!isBulkActive || !autoNavigateEnabled) return;
   pauseLearningPathVideos();
 
   let items = getLearningPathItems();
   if (items.length === 0) {
     for (let retry = 0; retry < 6; retry++) {
       await new Promise((r) => setTimeout(r, 600));
+      if (!isBulkActive || !autoNavigateEnabled) return;
       pauseLearningPathVideos();
       items = getLearningPathItems();
       if (items.length > 0) break;
@@ -725,6 +518,24 @@ async function handleLearningPathStep() {
     showHUD('🔍 Scanning Learning Path courses...', 'info');
     setTimeout(runAutonomousStep, 2000);
     return;
+  }
+
+  const { pathExamNotice } = await chrome.storage.local.get(['pathExamNotice']);
+  if (!isBulkActive || !autoNavigateEnabled) return;
+  if (pathExamNotice && validLearningPathUrl(pathExamNotice.pathUrl) &&
+      new URL(pathExamNotice.pathUrl).pathname === window.location.pathname) {
+    const course = items.find(item => new URL(item.fullHref).pathname.split('/')[2] === pathExamNotice.courseSlug);
+    await chrome.storage.local.set({ pathExamNotice: null });
+    if (!isBulkActive || !autoNavigateEnabled) return;
+    if (course && !course.completed) {
+      isBulkActive = false;
+      await chrome.storage.local.set({ bulkActive: false });
+      const message = `Returned to the path. ${course.title} still needs completion; check its final exam manually, then restart.`;
+      showHUD(message, 'warn');
+      sendProgress({ error: true, message });
+      await addLog(message, 'warn');
+      return;
+    }
   }
 
   // Save path state
@@ -756,6 +567,7 @@ async function handleLearningPathStep() {
     showHUD('🎉🎉 Entire Learning Path Completed! All courses finished!', 'success');
     await addLog(`🎉 Entire Learning Path completed! (${totalCount}/${totalCount} courses)`, 'success');
 
+    if (await advancePathQueue()) return;
     learningPathActive = false;
     lastLearningPathUrl = null;
     isBulkActive = false;
@@ -791,13 +603,14 @@ async function handleLearningPathStep() {
   showHUD(`📚 Opening: ${nextItem.title} (${completedCount + 1}/${totalCount})`, 'info');
   await addLog(`📚 Opening course: ${nextItem.title} (${completedCount + 1}/${totalCount})`, 'info');
 
+  if (!isBulkActive || !autoNavigateEnabled) return;
   // Scroll to and click the course
   isNavigatingToLesson = true;
 
   if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
   navWatchdogTimer = setTimeout(() => {
     isNavigatingToLesson = false;
-    if (isBulkActive) {
+    if (isBulkActive && autoNavigateEnabled) {
       log('Learning Path: Navigation timeout. Forcing URL:', nextItem.fullHref);
       window.location.href = nextItem.fullHref;
     }
@@ -807,6 +620,7 @@ async function handleLearningPathStep() {
     if (nextItem.element && nextItem.element.isConnected) {
       nextItem.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
       await new Promise(r => setTimeout(r, 500));
+      if (!isBulkActive || !autoNavigateEnabled) return;
       clickElement(nextItem.element);
     } else {
       window.location.href = nextItem.fullHref;
@@ -820,71 +634,52 @@ async function handleLearningPathStep() {
  * When a course finishes and learningPathActive is true,
  * return to the Learning Path overview page.
  */
-async function returnToLearningPath() {
-  const stored = await chrome.storage.local.get(['learningPathActive', 'lastLearningPathUrl']);
-
-  // 1. Try to click the "Back to Learning Path" button/link first
-  const backBtn = findBackToLearningPathButton();
-  if (backBtn && isElementClickable(backBtn)) {
-    log('Clicking "Back to Learning Path" button/link:', backBtn.innerText || backBtn.href);
-    showHUD('🎉 Course completed! Returning to Learning Path...', 'success');
-    await addLog('🎉 Course completed! Returning to Learning Path...', 'success');
-
-    const pathHref = backBtn.getAttribute('href') || backBtn.href || stored.lastLearningPathUrl;
-    if (pathHref && pathHref.includes('/learning/paths/')) {
-      await chrome.storage.local.set({
-        learningPathActive: true,
-        lastLearningPathUrl: pathHref
-      });
-    }
-
-    clickElement(backBtn);
-    await new Promise((r) => setTimeout(r, 2500));
-    return true;
+async function returnToLearningPath({ allowAutoplay = false, pendingExam = false } = {}) {
+  const epoch = quizRunEpoch;
+  const canReturn = () => epoch === quizRunEpoch && autoNavigateEnabled &&
+    (isBulkActive || (allowAutoplay && autoplayEnabled));
+  if (!canReturn()) return false;
+  const stored = await chrome.storage.local.get(['lastLearningPathUrl', 'pathQueueActive', 'pathQueue', 'pathQueueIndex']);
+  if (!canReturn()) return false;
+  const back = findBackToLearningPathButton();
+  const queued = stored.pathQueueActive ? stored.pathQueue?.[stored.pathQueueIndex || 0]?.url : null;
+  const target = [queued, back?.getAttribute('href') || back?.href, lastLearningPathUrl,
+    stored.lastLearningPathUrl, document.referrer].map(validLearningPathUrl).find(Boolean);
+  if (!target) {
+    log('Cannot return: no valid learning path URL is available.');
+    return false;
   }
-
-  // 2. Fall back to saved URL
-  if (stored.lastLearningPathUrl) {
-    log('Navigating to saved Learning Path URL:', stored.lastLearningPathUrl);
-    showHUD('🎉 Course completed! Returning to Learning Path...', 'success');
-    await addLog('🎉 Course completed! Returning to Learning Path...', 'success');
-    window.location.href = stored.lastLearningPathUrl;
-    return true;
-  }
-
-  // 3. Fall back: check if document has ANY link to /learning/paths/
-  const anyPathLink = document.querySelector('a[href*="/learning/paths/"], a[href*="/paths/"]');
-  if (anyPathLink && anyPathLink.href) {
-    log('Found Learning Path link in DOM, navigating:', anyPathLink.href);
-    showHUD('🎉 Returning to Learning Path...', 'success');
-    await chrome.storage.local.set({
-      learningPathActive: true,
-      lastLearningPathUrl: anyPathLink.href
-    });
-    window.location.href = anyPathLink.href;
-    return true;
-  }
-
-  // 4. Fall back: check contextUrn in URL parameters
-  const urlParams = new URLSearchParams(window.location.search);
-  const contextUrn = urlParams.get('contextUrn');
-  if (contextUrn && contextUrn.includes('LearningPath')) {
-    log('Found contextUrn with LearningPath. Navigating back in history...');
-    showHUD('🎉 Course completed! Navigating back to path...', 'success');
-    window.history.back();
-    return true;
-  }
-
-  // 5. Fall back: Navigate to default Chandigarh University Learning Path
-  const defaultPathUrl = 'https://www.linkedin.com/learning/paths/chandigarh-university-introduction-to-problem-solving-14957838?u=92961692';
-  log('Navigating to default Learning Path URL:', defaultPathUrl);
-  showHUD('🎉 Returning to Chandigarh University Learning Path...', 'info');
-  await chrome.storage.local.set({
-    learningPathActive: true,
-    lastLearningPathUrl: defaultPathUrl
-  });
-  window.location.href = defaultPathUrl;
+  if (new URL(target).pathname === window.location.pathname) return true;
+  learningPathActive = true;
+  lastLearningPathUrl = target;
+  const state = { learningPathActive: true, lastLearningPathUrl: target };
+  if (pendingExam) state.pathExamNotice = { pathUrl: target, courseSlug: getCourseSlug() };
+  await chrome.storage.local.set(state);
+  if (!canReturn()) return false;
+  // Cancel a pending lesson-navigation fallback so it cannot undo the return.
+  if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
+  navWatchdogTimer = null;
+  isNavigatingToLesson = true;
+  window.location.href = target;
   return true;
+}
+
+async function finishCourseAndReturnToPath() {
+  const examLink = document.querySelector('a[href*="/learning/exams/summative/"]');
+  const pendingExam = !!examLink && !isLessonCompleted(examLink.closest('li') || examLink);
+  // Return first. The overview decides whether this course actually needs an exam.
+  if (await returnToLearningPath({ pendingExam })) return true;
+  if (!isBulkActive) return false;
+  if (pendingExam) {
+    isBulkActive = false;
+    await chrome.storage.local.set({ bulkActive: false });
+    const message = 'Course lessons finished. Complete the final exam manually.';
+    showHUD(message, 'warn');
+    sendProgress({ error: true, message });
+    await addLog(message, 'warn');
+    return true;
+  }
+  return false;
 }
 
 // ─── Survey / Feedback Overlay Dismissal ──────────────────────────────────────
@@ -1050,7 +845,7 @@ function clickElement(el) {
     el.focus();
   } catch (e) {}
 
-  const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+  const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup'];
   for (const ev of events) {
     try {
       el.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }));
@@ -1177,39 +972,34 @@ function isForbiddenQuizButton(b) {
 }
 
 function findQuizActionAdvanceButton() {
-  // 1. Check for text matching Next, Submit, Submit and continue, Check answer, Continue
-  const textBtn = findButtonByText(
-    /^next$|^submit$|^next question$|submit and continue|check answer|^continue$|^lanjutkan$|^berikutnya$|^kirim$/i,
-    true
-  );
-  if (textBtn && !isForbiddenQuizButton(textBtn)) return textBtn;
-
-  // 2. Primary Artdeco button in bottom controls
-  const primaryButtons = Array.from(document.querySelectorAll(
-    'button.artdeco-button--primary, button[data-control-name*="next" i], button[data-control-name*="submit" i], button[class*="primary" i], button[class*="next" i], button[class*="submit" i]'
-  )).filter((b) => {
-    if (isInsideSidebar(b) || isLanguageElement(b) || isForbiddenQuizButton(b)) return false;
-    return true;
-  });
-  if (primaryButtons.length > 0) {
-    return primaryButtons[0];
-  }
-
-  // 3. Right-hand sibling of Previous
-  const prevBtn = findButtonByText(/^previous$|^kembali$|^sebelumnya$/i, true);
-  if (prevBtn && prevBtn.parentElement) {
-    const siblings = Array.from(prevBtn.parentElement.querySelectorAll('button, a[role="button"]')).filter((b) => {
-      return b !== prevBtn && !isLanguageElement(b) && !isInsideSidebar(b) && !isForbiddenQuizButton(b);
-    });
-    if (siblings.length > 0) {
-      return siblings[siblings.length - 1];
-    }
-  }
-
-  return null;
+  const root = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge') || document.body;
+  return Array.from(root.querySelectorAll('button, input[type="submit"], [role="button"]')).find(b => {
+    const text = (b.innerText || b.value || b.getAttribute('aria-label') || '').trim();
+    return !isInsideSidebar(b) && !isLanguageElement(b) && !isForbiddenQuizButton(b) &&
+      /^(?:next|submit|next question|submit and continue|check answer|continue|lanjutkan|berikutnya|kirim)$/i.test(text);
+  }) || null;
 }
 
 function parseCurrentQuizQuestion() {
+  // Current LinkedIn chapter quizzes expose a single question group and native inputs.
+  const groups = Array.from(document.querySelectorAll('.chapter-quiz-question')).filter(el => el.getClientRects().length > 0);
+  if (groups.length) {
+    if (groups.length !== 1) return null;
+    const group = groups[0];
+    const prompt = group.querySelector('.chapter-quiz-question__question-text')?.innerText?.trim();
+    const options = Array.from(group.querySelectorAll('.exam-option')).map(card => {
+      const input = card.querySelector('input[type="radio"], input[type="checkbox"]');
+      const label = card.querySelector('.exam-option__label');
+      const text = card.querySelector('.exam-option__label-text')?.innerText?.trim();
+      return { input, label, target: input, text, rawText: text };
+    });
+    if (!prompt || options.length < 2 || options.some(o => !o.input || !o.text) ||
+        new Set(options.map(o => o.input.type)).size !== 1) return null;
+    const root = group.closest('.chapter-quiz') || group;
+    const counter = (root.innerText || '').match(/Question\s+\d+\s+of\s+\d+/i)?.[0] || '';
+    return { prompt, counter, type: options[0].input.type, options };
+  }
+
   // 1. Detect Question Counter (e.g. "Question 1 of 12" or "Pertanyaan 1 dari 8")
   let counterText = '';
   let counterEl = null;
@@ -1470,261 +1260,67 @@ function parseCurrentQuizQuestion() {
 
 // ─── Coursera-Style Quiz Option Selection & Resolution Engine ────────────────
 
+function optionIsSelected(option) {
+  const input = option.input || (option.target?.tagName === 'INPUT' ? option.target : option.target?.querySelector('input'));
+  if (input) return !!input.checked;
+  const target = option.target || option.label || option.card;
+  const control = target?.matches?.('[role="radio"], [role="checkbox"]') ? target : target?.querySelector('[role="radio"], [role="checkbox"]');
+  const value = control?.getAttribute('aria-checked');
+  return value === 'true' ? true : value === 'false' ? false : null;
+}
+
 async function selectOption(option, shouldCheck = true) {
   if (!option) return false;
-
-  const input = option.input || (option.target && option.target.tagName === 'INPUT' ? option.target : option.target?.querySelector('input'));
-  let label = option.label || (input ? (input.closest('label') || (input.id ? document.querySelector(`label[for="${CSS.escape(input.id)}"]`) : null)) : null);
-  const card = option.card || option.target || label;
-  const target = label || card || input;
-
-  if (!target || isLanguageElement(target) || isInsideSidebar(target)) {
-    return false;
+  const input = option.input || (option.target?.tagName === 'INPUT' ? option.target : option.target?.querySelector('input'));
+  const target = input || option.label || option.target || option.card;
+  if (!target || isLanguageElement(target) || isInsideSidebar(target)) return false;
+  const before = optionIsSelected(option);
+  if (before === shouldCheck) return true;
+  target.click();
+  for (let i = 0; i < 5; i++) {
+    await new Promise(r => setTimeout(r, 100));
+    if (optionIsSelected(option) === shouldCheck) return true;
   }
-
-  try {
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    target.focus();
-  } catch (e) {}
-
-  // 1. Dispatch full pointer and click events on target / label
-  try {
-    target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, view: window }));
-    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-    target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, view: window }));
-    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
-    target.click();
-  } catch (e) {}
-
-  // 2. Click the custom radio indicator circle if present (Artdeco)
-  const indicator = target.querySelector('.artdeco-radio-indicator, [class*="indicator"], [class*="radio-circle"]') ||
-                    card?.querySelector('.artdeco-radio-indicator, [class*="indicator"], [class*="radio-circle"]');
-  if (indicator) {
-    try {
-      indicator.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-    } catch (e) {}
-  }
-
-  // 3. Click the underlying input element directly if present
-  if (input) {
-    try {
-      input.focus();
-      input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-      input.checked = shouldCheck;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-    } catch (e) {}
-  }
-
-  // 4. Also click the card container if distinct from target
-  if (card && card !== target) {
-    try {
-      card.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-    } catch (e) {}
-  }
-
-  // 5. Update ARIA state
-  if (target.hasAttribute && target.hasAttribute('role')) {
-    try {
-      target.setAttribute('aria-checked', shouldCheck ? 'true' : 'false');
-      target.setAttribute('aria-pressed', shouldCheck ? 'true' : 'false');
-    } catch (e) {}
-  }
-
-  await new Promise((r) => setTimeout(r, 200));
-
-  // 6. Force-enable the Submit button
-  const advanceBtn = findQuizActionAdvanceButton();
-  if (advanceBtn) {
-    try {
-      advanceBtn.removeAttribute('disabled');
-      advanceBtn.disabled = false;
-      advanceBtn.setAttribute('aria-disabled', 'false');
-      advanceBtn.classList.remove('artdeco-button--disabled');
-    } catch (e) {}
-  }
-
+  return false;
 }
 
 async function selectOptionAndVerify(option) {
   return selectOption(option, true);
 }
 
+function matchAnswerIndices(options, ans) {
+  if (!options?.length || !ans || ans.error) return [];
+  const texts = Array.isArray(ans.answerTexts) ? ans.answerTexts : [];
+  const indices = Array.isArray(ans.answerIndices) ? ans.answerIndices : [];
+  if (texts.some(t => typeof t !== 'string')) return [];
+  if (indices.some(i => !Number.isInteger(i) || i < 0 || i >= options.length)) return [];
+  const mapped = [];
+  for (const text of texts) {
+    const matches = options.flatMap((o, i) => cleanFormulaText(o.text) === cleanFormulaText(text) ? [i] : []);
+    if (matches.length !== 1) return [];
+    mapped.push(matches[0]);
+  }
+  const unique = [...new Set(mapped.length ? mapped : indices)];
+  if (mapped.length && indices.length && (unique.length !== new Set(indices).size || unique.some(i => !indices.includes(i)))) return [];
+  return unique;
+}
+
 function resolveSingleChoiceOption(options, ans, knownWrongAnswers = []) {
-  if (!options || options.length === 0) return { index: -1, reason: 'No options available' };
-  const ansTexts = (ans.answerTexts || []).map((t) => (t || '').trim()).filter(Boolean);
-  const ansIndices = ans.answerIndices || [];
-
-  const isWrong = (txt) => {
-    return (knownWrongAnswers || []).some((w) => cleanFormulaText(w) === cleanFormulaText(txt) || stripAll(w) === stripAll(txt));
-  };
-
-  // TIER 1: Exact / Clean Formula Match
-  for (const ansText of ansTexts) {
-    const cleanAns = cleanFormulaText(ansText);
-    const matchIdx = options.findIndex((o) => cleanFormulaText(o.text) === cleanAns);
-    if (matchIdx !== -1 && !isWrong(options[matchIdx].text)) {
-      return { index: matchIdx, reason: `Exact formula match: "${ansText}"` };
-    }
+  const indices = matchAnswerIndices(options, ans);
+  if (indices.length !== 1 || knownWrongAnswers.some(t => cleanFormulaText(t) === cleanFormulaText(options[indices[0]].text))) {
+    return { index: -1, reason: 'No unambiguous valid single answer' };
   }
-
-  // TIER 2: Numeric Equality Match (prevents float/integer discrepancies)
-  for (const ansText of ansTexts) {
-    if (isNumericString(ansText)) {
-      const numAns = Number(ansText);
-      const matchIdx = options.findIndex((o) => isNumericString(o.text) && Math.abs(Number(o.text) - numAns) < 1e-5);
-      if (matchIdx !== -1 && !isWrong(options[matchIdx].text)) {
-        return { index: matchIdx, reason: `Numeric equality match: ${numAns}` };
-      }
-    }
-  }
-
-  // TIER 3: Punctuation & Space Insensitive Match
-  for (const ansText of ansTexts) {
-    const strippedAns = stripAll(ansText);
-    if (strippedAns.length >= 2) {
-      const matchIdx = options.findIndex((o) => stripAll(o.text) === strippedAns);
-      if (matchIdx !== -1 && !isWrong(options[matchIdx].text)) {
-        return { index: matchIdx, reason: `Normalized match: "${ansText}"` };
-      }
-    }
-  }
-
-  // TIER 4: Verified Index Match
-  if (ansIndices.length > 0) {
-    const idx = ansIndices[0];
-    if (options[idx] && !isWrong(options[idx].text)) {
-      if (ansTexts.length === 0) {
-        return { index: idx, reason: `Direct index [${idx}]` };
-      }
-      const optClean = stripAll(options[idx].text);
-      const ansClean = stripAll(ansTexts[0]);
-      if (optClean === ansClean || optClean.includes(ansClean) || ansClean.includes(optClean)) {
-        return { index: idx, reason: `Verified index [${idx}] ("${options[idx].text}")` };
-      }
-    }
-  }
-
-  // TIER 5: Phrase / Substring Match for text (Non-numeric, length >= 3)
-  for (const ansText of ansTexts) {
-    const cleanAns = cleanFormulaText(ansText);
-    if (!isNumericString(cleanAns) && cleanAns.length >= 3) {
-      const matchIdx = options.findIndex((o) => {
-        const optClean = cleanFormulaText(o.text);
-        return !isNumericString(optClean) && (optClean.includes(cleanAns) || cleanAns.includes(optClean));
-      });
-      if (matchIdx !== -1 && !isWrong(options[matchIdx].text)) {
-        return { index: matchIdx, reason: `Substring match: "${ansText}" in "${options[matchIdx].text}"` };
-      }
-    }
-  }
-
-  // TIER 6: Fallback to index if within bounds and not wrong
-  if (ansIndices.length > 0 && options[ansIndices[0]] && !isWrong(options[ansIndices[0]].text)) {
-    return { index: ansIndices[0], reason: `Fallback index [${ansIndices[0]}]` };
-  }
-
-  // TIER 7: First un-eliminated option
-  for (let i = 0; i < options.length; i++) {
-    if (!isWrong(options[i].text)) {
-      return { index: i, reason: `Uneliminated candidate [${i}]` };
-    }
-  }
-
-  return { index: 0, reason: 'Default index 0 fallback' };
+  return { index: indices[0], reason: 'Validated option mapping' };
 }
 
 function resolveMultipleChoiceOptions(options, ans) {
-  if (!options || options.length === 0) return [];
-  const ansTexts = (ans.answerTexts || []).map((t) => (t || '').trim()).filter(Boolean);
-  const ansIndices = ans.answerIndices || [];
-
-  const selected = [];
-
-  options.forEach((opt, optIdx) => {
-    const optClean = cleanFormulaText(opt.text);
-    const optStripped = stripAll(opt.text);
-    let matched = false;
-    let matchReason = '';
-
-    // Check 1: Exact / Clean formula match
-    for (const ansText of ansTexts) {
-      if (cleanFormulaText(ansText) === optClean) {
-        matched = true;
-        matchReason = `Exact match "${ansText}"`;
-        break;
-      }
-    }
-
-    // Check 2: Numeric equality match
-    if (!matched && isNumericString(opt.text)) {
-      const numOpt = Number(opt.text);
-      for (const ansText of ansTexts) {
-        if (isNumericString(ansText) && Math.abs(Number(ansText) - numOpt) < 1e-5) {
-          matched = true;
-          matchReason = `Numeric equality ${numOpt}`;
-          break;
-        }
-      }
-    }
-
-    // Check 3: Punctuation & Space Insensitive Match
-    if (!matched && optStripped.length >= 2) {
-      for (const ansText of ansTexts) {
-        if (stripAll(ansText) === optStripped) {
-          matched = true;
-          matchReason = `Normalized match "${ansText}"`;
-          break;
-        }
-      }
-    }
-
-    // Check 4: Verified index match
-    if (!matched && ansIndices.includes(optIdx)) {
-      if (ansTexts.length === 0 || ansTexts.some((t) => stripAll(t).includes(optStripped) || optStripped.includes(stripAll(t)))) {
-        matched = true;
-        matchReason = `Verified index [${optIdx}]`;
-      }
-    }
-
-    // Check 5: Phrase match for descriptive text
-    if (!matched && !isNumericString(optClean) && optClean.length >= 4) {
-      for (const ansText of ansTexts) {
-        const cleanAns = cleanFormulaText(ansText);
-        if (!isNumericString(cleanAns) && cleanAns.length >= 4 && (optClean.includes(cleanAns) || cleanAns.includes(optClean))) {
-          matched = true;
-          matchReason = `Phrase match with "${ansText}"`;
-          break;
-        }
-      }
-    }
-
-    if (matched) {
-      selected.push({ index: optIdx, text: opt.text, reason: matchReason });
-    }
-  });
-
-  // Robust Fallbacks for Multiple Choice
-  if (selected.length === 0) {
-    for (const idx of ansIndices) {
-      if (options[idx]) {
-        selected.push({ index: idx, text: options[idx].text, reason: `Index fallback [${idx}]` });
-      }
-    }
-  }
-  if (selected.length === 0 && options.length > 0) {
-    selected.push({ index: 0, text: options[0].text, reason: 'Default first option fallback' });
-  }
-
-  return selected;
+  return matchAnswerIndices(options, ans).map(index => ({ index, text: options[index].text, reason: 'Validated option mapping' }));
 }
 
 function resolveAnswerIndices(question, aiAnswer) {
-  if (question.type === 'checkbox') {
-    return resolveMultipleChoiceOptions(question.options, aiAnswer).map((r) => r.index);
-  }
+  if (question.type === 'checkbox') return matchAnswerIndices(question.options, aiAnswer);
   const single = resolveSingleChoiceOption(question.options, aiAnswer);
-  return single.index >= 0 ? [single.index] : [0];
+  return single.index < 0 ? [] : [single.index];
 }
 
 const quizWrongAnswersMap = new Map();
@@ -1747,7 +1343,7 @@ function learnFromQuizReviewScreen() {
       if (!promptEl) continue;
       const promptText = (promptEl.innerText || '').trim();
       if (promptText.length < 8) continue;
-      const qKey = promptText.toLowerCase();
+      const qKey = `${getCourseSlug() || ''}:${promptText.toLowerCase()}`;
 
       // Find options in this card
       const optionEls = card.querySelectorAll('li, label, [role="radio"], [role="checkbox"], [class*="option"], [class*="choice"], [class*="answer"]');
@@ -1767,10 +1363,12 @@ function learnFromQuizReviewScreen() {
           /quiz-challenge__status--incorrect|status--incorrect|feedback--incorrect/i.test(optHtml);
 
         if (isCorrect && !isIncorrect) {
-          quizCorrectAnswersMap.set(qKey, optText);
+          const correct = quizCorrectAnswersMap.get(qKey) || new Set();
+          correct.add(optText);
+          quizCorrectAnswersMap.set(qKey, correct);
           learnedCount++;
           log(`Learned CORRECT answer for "${promptText}": "${optText}"`);
-        } else if (isIncorrect) {
+        } else if (isIncorrect && !card.querySelector('input[type="checkbox"], [role="checkbox"]')) {
           const wrongList = quizWrongAnswersMap.get(qKey) || [];
           if (!wrongList.includes(optText)) wrongList.push(optText);
           quizWrongAnswersMap.set(qKey, wrongList);
@@ -1788,14 +1386,15 @@ function learnFromQuizReviewScreen() {
 }
 
 async function askAIForQuestion(q) {
-  const questionKey = (q.prompt || '').trim().toLowerCase();
+  const questionKey = `${getCourseSlug() || ''}:${(q.prompt || '').trim().toLowerCase()}`;
 
   // 1. Check if we already have the verified correct answer from review feedback!
-  const knownCorrectAnswer = quizCorrectAnswersMap.get(questionKey);
-  if (knownCorrectAnswer) {
+  const correctAnswers = quizCorrectAnswersMap.get(questionKey);
+  const knownCorrectAnswer = correctAnswers?.size === 1 ? [...correctAnswers][0] : null;
+  if (knownCorrectAnswer && q.type === 'radio' && q.options.some(o => cleanFormulaText(o.text) === cleanFormulaText(knownCorrectAnswer))) {
     log(`Using verified correct answer for "${q.prompt}": "${knownCorrectAnswer}"`);
-    const matchIdx = q.options.findIndex((o) => cleanFormulaText(o.text) === cleanFormulaText(knownCorrectAnswer) || stripAll(o.text) === stripAll(knownCorrectAnswer));
-    const targetIdx = matchIdx !== -1 ? matchIdx : 0;
+    const matchIdx = q.options.findIndex((o) => cleanFormulaText(o.text) === cleanFormulaText(knownCorrectAnswer));
+    const targetIdx = matchIdx;
     return {
       answerIndices: [targetIdx],
       answerTexts: [q.options[targetIdx]?.text || knownCorrectAnswer],
@@ -1809,8 +1408,8 @@ async function askAIForQuestion(q) {
 
   const knownWrongAnswers = quizWrongAnswersMap.get(questionKey) || [];
 
-  let prompt = `You are a distinguished university professor and academic expert solving a certification exam with 100% precision.\n`;
-  prompt += `Solve the following LinkedIn Learning course quiz question with absolute accuracy.\n\n`;
+  let prompt = `Answer the course quiz using the supplied question and options.\n`;
+  prompt += `Choose the best supported answer. If unsure, return empty answer arrays.\n\n`;
   if (courseTitle) prompt += `COURSE NAME: ${courseTitle}\n`;
   if (chapterTitle) prompt += `CHAPTER / LESSON TOPIC: ${chapterTitle}\n`;
   prompt += `QUESTION TYPE: ${q.type === 'checkbox' ? 'Multiple choice (select ALL that apply)' : 'Single choice (select EXACTLY ONE best answer)'}\n`;
@@ -1842,27 +1441,8 @@ Output ONLY a valid JSON object without Markdown formatting:
     chrome.runtime.sendMessage({ action: 'ASK_AI', prompt }, resolve);
   });
 
-  // Calculate smart fallback index avoiding known wrong answers:
-  let fallbackIdx = 0;
-  for (let i = 0; i < q.options.length; i++) {
-    const optText = q.options[i].text;
-    if (!knownWrongAnswers.some(w => cleanFormulaText(w) === cleanFormulaText(optText) || stripAll(w) === stripAll(optText))) {
-      fallbackIdx = i;
-      break;
-    }
-  }
-
-  if (!response || !response.success || !response.text) {
-    log(`AI request failed, fallback to index ${fallbackIdx}:`, response?.error);
-    showHUD(`⚠️ AI Key Notice: ${response?.error || 'Using smart fallback'}`, 'error');
-    await addLog(`AI request failed: ${response?.error || 'Unknown error'}`, 'warn');
-    return {
-      answerIndices: [fallbackIdx],
-      answerTexts: [q.options[fallbackIdx]?.text || ''],
-      provider: `Fallback (Index ${fallbackIdx})`,
-      rawPrompt: prompt,
-      rawResponse: response?.error || 'No response'
-    };
+  if (!response?.success || !response.text) {
+    throw new Error(response?.error || 'AI provider returned no answer. Check your API key.');
   }
 
   let text = response.text.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -1877,20 +1457,10 @@ Output ONLY a valid JSON object without Markdown formatting:
     }
   }
 
-  // Regex fallback if JSON parsing failed
-  if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.answerIndices)) {
-    const idxMatch = text.match(/"answerIndices"\s*:\s*\[([0-9,\s]+)\]/i);
-    if (idxMatch) {
-      const extractedIndices = idxMatch[1].split(',').map((n) => parseInt(n.trim(), 10)).filter((n) => !isNaN(n));
-      if (extractedIndices.length > 0) {
-        parsed = { answerIndices: extractedIndices, answerTexts: [] };
-      }
-    }
-  }
-
-  if (Array.isArray(parsed)) parsed = parsed[0];
-  if (!parsed || typeof parsed !== 'object') {
-    parsed = { answerIndices: [fallbackIdx], answerTexts: [q.options[fallbackIdx]?.text || ''] };
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
+      (!Array.isArray(parsed.answerTexts) && !Array.isArray(parsed.answerIndices)) ||
+      resolveAnswerIndices(q, parsed).length === 0) {
+    throw new Error('AI response did not match the current options. No answer was submitted.');
   }
   parsed.provider = response.provider || 'AI';
   parsed.rawPrompt = prompt;
@@ -1901,6 +1471,8 @@ Output ONLY a valid JSON object without Markdown formatting:
 async function solveLinkedInQuiz() {
   if (isSolvingQuiz) return false;
   isSolvingQuiz = true;
+  quizError = null;
+  const runEpoch = quizRunEpoch;
 
   const sessionQuestions = [];
   let lastProviderUsed = 'AI';
@@ -1921,12 +1493,14 @@ async function solveLinkedInQuiz() {
     while (step < maxSteps) {
       step++;
       await new Promise((r) => setTimeout(r, 700));
+      if (runEpoch !== quizRunEpoch) return false;
 
       // 1. Check for "Start quiz", "Resume quiz", or "Take quiz" button
       const startBtn = findButtonByText(/start quiz|resume quiz|take quiz|begin quiz|mulai kuis|mulai tes/i);
       if (startBtn && isElementClickable(startBtn)) {
         log('Clicking Start/Resume Quiz button:', startBtn.innerText);
         showHUD(`▶ Clicking "${startBtn.innerText}"...`);
+        if (runEpoch !== quizRunEpoch) return false;
         clickElement(startBtn);
         await new Promise((r) => setTimeout(r, 1400));
         continue;
@@ -1937,6 +1511,7 @@ async function solveLinkedInQuiz() {
       if (resultsBtn && isElementClickable(resultsBtn)) {
         log('Clicking View Results button:', resultsBtn.innerText);
         showHUD(`▶ Viewing quiz results...`);
+        if (runEpoch !== quizRunEpoch) return false;
         clickElement(resultsBtn);
         await new Promise((r) => setTimeout(r, 1400));
         continue;
@@ -1950,6 +1525,7 @@ async function solveLinkedInQuiz() {
       if ((feedbackPresent || nextQuestionBtn) && nextQuestionBtn && isElementClickable(nextQuestionBtn)) {
         log('Advancing to next question:', nextQuestionBtn.innerText);
         showHUD(`▶ Advancing to next question...`);
+        if (runEpoch !== quizRunEpoch) return false;
         clickElement(nextQuestionBtn);
         await new Promise((r) => setTimeout(r, 1200));
         continue;
@@ -1976,6 +1552,7 @@ async function solveLinkedInQuiz() {
           if (retakeBtn && isElementClickable(retakeBtn)) {
             log('Clicking Retake button on score screen:', retakeBtn.innerText);
             showHUD(`▶ Retrying quiz: "${retakeBtn.innerText}"...`);
+            if (runEpoch !== quizRunEpoch) return false;
             clickElement(retakeBtn);
             await new Promise((r) => setTimeout(r, 2000));
             continue;
@@ -1984,11 +1561,13 @@ async function solveLinkedInQuiz() {
           const reviewBtn = findButtonByText(/review all answers|review answers|tinjau jawaban/i);
           if (reviewBtn && isElementClickable(reviewBtn)) {
             log('Clicking Review all answers to learn correct options:', reviewBtn.innerText);
+            if (runEpoch !== quizRunEpoch) return false;
             clickElement(reviewBtn);
             await new Promise((r) => setTimeout(r, 2000));
             learnFromQuizReviewScreen();
             const retakeAfterReview = findButtonByText(/^retake$|retake quiz|take quiz again|try again/i);
             if (retakeAfterReview && isElementClickable(retakeAfterReview)) {
+              if (runEpoch !== quizRunEpoch) return false;
               clickElement(retakeAfterReview);
               await new Promise((r) => setTimeout(r, 2000));
               continue;
@@ -2008,6 +1587,7 @@ async function solveLinkedInQuiz() {
           showHUD(`✓ Quiz finished! Clicking "${finalContinueBtn.innerText}"...`, 'success');
           sendProgress({ message: `✓ Quiz finished! Clicking "${finalContinueBtn.innerText}"...` });
           await addLog(`✓ Quiz completed! Clicking "${finalContinueBtn.innerText}"`, 'success');
+          if (runEpoch !== quizRunEpoch) return false;
           clickElement(finalContinueBtn);
           await new Promise((r) => setTimeout(r, 2000));
           break;
@@ -2016,6 +1596,7 @@ async function solveLinkedInQuiz() {
         // Check if there is an un-clicked results or next button
         const lingeringNext = findButtonByText(/^next question$|^view results$|^see results$/i);
         if (lingeringNext && isElementClickable(lingeringNext) && !isForbiddenQuizButton(lingeringNext)) {
+          if (runEpoch !== quizRunEpoch) return false;
           clickElement(lingeringNext);
           await new Promise((r) => setTimeout(r, 1400));
           continue;
@@ -2049,13 +1630,7 @@ async function solveLinkedInQuiz() {
       if (currentQ.prompt === lastHandledPrompt) {
         consecutiveSamePromptCount++;
         if (consecutiveSamePromptCount >= 3) {
-          log('Stuck on same prompt 3 times. Attempting submit/advance:', currentQ.prompt);
-          const anySubmit = findButtonByText(/^submit$|^continue$|^next$|^kirim$|^lanjutkan$/i, true);
-          if (anySubmit) {
-            clickElement(anySubmit);
-            await new Promise((r) => setTimeout(r, 1500));
-          }
-          break;
+          throw new Error('Quiz did not advance after submission. Check the current question before retrying.');
         }
       } else {
         lastHandledPrompt = currentQ.prompt;
@@ -2069,6 +1644,13 @@ async function solveLinkedInQuiz() {
 
       // 5. Ask AI for answer
       const aiAnswer = await askAIForQuestion(currentQ);
+      if (runEpoch !== quizRunEpoch) return false;
+      const freshQuestion = parseCurrentQuizQuestion();
+      if (!freshQuestion || freshQuestion.prompt !== currentQ.prompt ||
+          JSON.stringify(freshQuestion.options.map(o => o.text)) !== JSON.stringify(currentQ.options.map(o => o.text))) {
+        throw new Error('Question changed while the AI request was running. Retry the current quiz.');
+      }
+      currentQ = freshQuestion;
       let chosenIndices = [];
       let markedTexts = [];
       let matchReason = '';
@@ -2088,7 +1670,8 @@ async function solveLinkedInQuiz() {
         for (let j = 0; j < currentQ.options.length; j++) {
           const opt = currentQ.options[j];
           const shouldSelect = resolvedIndices.has(j);
-          await selectOption(opt, shouldSelect);
+          if (runEpoch !== quizRunEpoch) return false;
+          if (!await selectOption(opt, shouldSelect)) throw new Error('Could not verify checkbox selection.');
           if (shouldSelect) {
             await new Promise((r) => setTimeout(r, 200));
           }
@@ -2096,14 +1679,15 @@ async function solveLinkedInQuiz() {
         showHUD(`✓ Marked: [${markedTexts.join(', ')}]`);
         log(`Selected checkbox options [${chosenIndices.join(', ')}]: "${markedTexts.join(', ')}"`);
       } else {
-        const qKey = (currentQ.prompt || '').trim().toLowerCase();
+        const qKey = `${getCourseSlug() || ''}:${(currentQ.prompt || '').trim().toLowerCase()}`;
         const knownWrong = quizWrongAnswersMap.get(qKey) || [];
         const resolution = resolveSingleChoiceOption(currentQ.options, aiAnswer, knownWrong);
-        const chosenIdx = resolution.index >= 0 ? resolution.index : 0;
+        const chosenIdx = resolution.index;
+        if (chosenIdx < 0) throw new Error('No valid answer matched the current question.');
         chosenIndices = [chosenIdx];
         const chosenOpt = currentQ.options[chosenIdx];
         if (chosenOpt) {
-          await selectOption(chosenOpt, true);
+          if (!await selectOption(chosenOpt, true)) throw new Error('Could not verify answer selection.');
           markedTexts = [chosenOpt.text];
           matchReason = resolution.reason;
           showHUD(`✓ Selected: "${chosenOpt.text.substring(0, 36)}..."`);
@@ -2145,31 +1729,28 @@ async function solveLinkedInQuiz() {
       // Wait 400ms for React state to reconcile
       await new Promise((r) => setTimeout(r, 400));
 
+      if (runEpoch !== quizRunEpoch) return false;
+      if (!currentQ.options.every((o, i) => optionIsSelected(o) === chosenIndices.includes(i))) {
+        throw new Error('Selected answers do not match the expected options.');
+      }
       // 7. Find and click question Submit or Advance button
       let advanceBtn = null;
       const waitStart = Date.now();
       while (Date.now() - waitStart < 3000) {
+        if (runEpoch !== quizRunEpoch) return false;
         advanceBtn = findQuizActionAdvanceButton();
         if (advanceBtn && isElementClickable(advanceBtn)) break;
         await new Promise((r) => setTimeout(r, 200));
       }
 
-      if (advanceBtn) {
+      if (advanceBtn && isElementClickable(advanceBtn)) {
         const btnText = (advanceBtn.innerText || advanceBtn.value || advanceBtn.getAttribute('aria-label') || 'Submit').trim();
         log('Clicking Quiz Advance/Submit button:', btnText);
         showHUD(`▶ Submitting: "${btnText}"...`);
-        try {
-          advanceBtn.removeAttribute('disabled');
-          advanceBtn.disabled = false;
-          advanceBtn.setAttribute('aria-disabled', 'false');
-        } catch (e) {}
+        if (runEpoch !== quizRunEpoch) return false;
         clickElement(advanceBtn);
       } else {
-        log('Advance/Submit button not found. Checking for fallback...');
-        const fallbackBtn = findButtonByText(/^next$|^submit$|^skip$|^continue$|^lanjutkan$|^berikutnya$/i, true);
-        if (fallbackBtn && !isForbiddenQuizButton(fallbackBtn)) {
-          clickElement(fallbackBtn);
-        }
+        throw new Error('Submit is disabled or unavailable; the quiz was left unchanged.');
       }
 
       // Wait 1.4s for LinkedIn to evaluate and transition
@@ -2179,9 +1760,9 @@ async function solveLinkedInQuiz() {
       const isIncorrectFeedback = !!document.querySelector('.quiz-challenge__feedback--incorrect, [class*="feedback--incorrect"], [class*="status--incorrect"], [aria-label*="incorrect" i]');
       const feedbackText = (document.querySelector('.quiz-challenge__feedback, [class*="feedback"], .quiz-challenge__status')?.innerText || '').toLowerCase();
       if (isIncorrectFeedback || feedbackText.includes('incorrect') || feedbackText.includes('salah')) {
-        const qKey = (currentQ.prompt || '').trim().toLowerCase();
+        const qKey = `${getCourseSlug() || ''}:${(currentQ.prompt || '').trim().toLowerCase()}`;
         const wrongList = quizWrongAnswersMap.get(qKey) || [];
-        for (const t of markedTexts) {
+        for (const t of currentQ.type === 'radio' ? markedTexts : []) {
           if (!wrongList.includes(t)) wrongList.push(t);
         }
         quizWrongAnswersMap.set(qKey, wrongList);
@@ -2195,6 +1776,7 @@ async function solveLinkedInQuiz() {
       if (followUpBtn && isElementClickable(followUpBtn) && !isForbiddenQuizButton(followUpBtn)) {
         log('Clicking follow-up advance button:', followUpBtn.innerText);
         showHUD(`▶ Advancing: "${followUpBtn.innerText}"...`);
+        if (runEpoch !== quizRunEpoch) return false;
         clickElement(followUpBtn);
         await new Promise((r) => setTimeout(r, 1200));
       }
@@ -2207,80 +1789,57 @@ async function solveLinkedInQuiz() {
   } catch (err) {
     log('Quiz solver error:', err);
     showHUD('❌ Quiz solver error: ' + err.message, 'error');
-    isSolvingQuiz = false;
+    quizError = err.message;
+    if (isBulkActive) {
+      isBulkActive = false;
+      await chrome.storage.local.set({ bulkActive: false });
+    }
+    await addLog(`Quiz paused: ${err.message}`, 'error');
+    sendProgress({ error: true, message: err.message });
     return false;
+  } finally {
+    isSolvingQuiz = false;
   }
 }
 
 // ─── 🛡️ Green Tick Verification & Auto-Retry Engine ─────────────────────────
 
-async function verifyQuizGreenTick(maxWaitMs = 5000) {
+async function verifyQuizGreenTick(maxWaitMs = 5000, quizPath = window.location.pathname, epoch = quizRunEpoch) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
+    if (epoch !== quizRunEpoch) return false;
     expandAllSections();
-
-    // Check 1: Active item in syllabus sidebar
-    const activeSidebarItem = document.querySelector(
-      'li.classroom-toc-item--selected, li.selected, li.active, [aria-current="page"], [aria-selected="true"]'
-    );
-    if (activeSidebarItem) {
-      const row = activeSidebarItem.closest('li') || activeSidebarItem;
-      if (isLessonCompleted(row)) {
-        log('✓ Green tick confirmed on active sidebar item!');
-        return true;
-      }
+    const item = getCourseSyllabus().find(l => l.href === quizPath);
+    if (item?.completed) return true;
+    // A different completed quiz or a generic “Results” heading is insufficient.
+    if (window.location.pathname === quizPath) {
+      const root = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge');
+      if (/\b(?:you passed|quiz passed|assessment complete)\b/i.test(root?.innerText || '')) return true;
     }
-
-    // Check 2: Match by syllabus item URL
-    const syllabus = getCourseSyllabus();
-    const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
-    const quizItem = syllabus.find((l) => {
-      const h = (l.href || '').toLowerCase();
-      return h.includes(currentPath) || currentPath.includes(h);
-    });
-
-    if (quizItem && quizItem.completed) {
-      log('✓ Green tick confirmed on syllabus for:', quizItem.title);
-      return true;
-    }
-
-    // Check 3: Check any quiz item in syllabus if current page is a quiz
-    for (const item of syllabus) {
-      if (/quiz|assessment/i.test(item.title) && item.completed) {
-        log('✓ Green tick confirmed on quiz item:', item.title);
-        return true;
-      }
-    }
-
-    // Check 4: Check if page itself indicates passed or completed
-    const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
-    if (
-      /you passed|quiz passed|congratulations.*passed|score: 100%|score: [7-9]\d%|assessment complete|skill assessment.*complete|results/i.test(bodyText) ||
-      (window.location.pathname.includes('career-hub') && (document.body ? document.body.innerText : '').includes('Return to course'))
-    ) {
-      log('✓ Quiz / Assessment completion confirmed!');
-      return true;
-    }
-
-    await new Promise((r) => setTimeout(r, 600));
+    await new Promise(r => setTimeout(r, 600));
   }
   return false;
 }
 
 async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
   if (isSolvingQuiz) return false;
+  const retryEpoch = quizRunEpoch;
+  const quizPath = window.location.pathname;
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    if (retryEpoch !== quizRunEpoch) return false;
     log(`Starting Quiz Attempt ${attempt}/${maxRetries}...`);
     showHUD(`🧠 Auto-Solving Quiz: Attempt ${attempt}/${maxRetries}...`);
 
-    await solveLinkedInQuiz();
+    const solved = await solveLinkedInQuiz();
+    if (!solved || quizError) return false;
 
     // Pause 2s for LinkedIn backend to process answers and update checkmark
     showHUD('⏳ Verifying green tick in syllabus...');
     await new Promise((r) => setTimeout(r, 2000));
 
-    const isVerified = await verifyQuizGreenTick(4000);
+    const isVerified = await verifyQuizGreenTick(4000, quizPath, retryEpoch);
+    if (retryEpoch !== quizRunEpoch) return false;
     if (isVerified) {
       log('🎉 Green tick / Completion CONFIRMED on quiz!');
       showHUD('✅ Verified! Quiz completed.', 'success');
@@ -2290,6 +1849,7 @@ async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
       const lingeringSubmit = findButtonByText(/return to course|back to course|kembali ke kursus|submit and continue|next lesson/i);
       if (lingeringSubmit && isElementClickable(lingeringSubmit) && !isForbiddenQuizButton(lingeringSubmit)) {
         log('Clicking final return / continue button:', lingeringSubmit.innerText);
+        if (retryEpoch !== quizRunEpoch) return false;
         clickElement(lingeringSubmit);
         await new Promise((r) => setTimeout(r, 2000));
       }
@@ -2310,6 +1870,7 @@ async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
       if (retakeBtn && isElementClickable(retakeBtn)) {
         log('Clicking Retake Quiz button:', retakeBtn.innerText);
         showHUD(`▶ Clicking "${retakeBtn.innerText}"...`);
+        if (retryEpoch !== quizRunEpoch) return false;
         clickElement(retakeBtn);
         await new Promise((r) => setTimeout(r, 2000));
       } else {
@@ -2317,11 +1878,13 @@ async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
         const reviewBtn = findButtonByText(/review all answers|review answers|tinjau jawaban/i);
         if (reviewBtn && isElementClickable(reviewBtn)) {
           log('Clicking Review all answers to learn correct options:', reviewBtn.innerText);
+          if (retryEpoch !== quizRunEpoch) return false;
           clickElement(reviewBtn);
           await new Promise((r) => setTimeout(r, 2000));
           learnFromQuizReviewScreen();
           const retakeAfter = findButtonByText(/^retake$|retake quiz|take quiz again|try again|restart quiz/i);
           if (retakeAfter && isElementClickable(retakeAfter)) {
+            if (retryEpoch !== quizRunEpoch) return false;
             clickElement(retakeAfter);
             await new Promise((r) => setTimeout(r, 2000));
           }
@@ -2332,6 +1895,7 @@ async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
           );
           if (tocQuiz && isElementClickable(tocQuiz)) {
             log('Clicking Chapter Quiz in TOC sidebar to reset attempt...');
+            if (retryEpoch !== quizRunEpoch) return false;
             clickElement(tocQuiz);
             await new Promise((r) => setTimeout(r, 2500));
           }
@@ -2350,7 +1914,7 @@ let quizAutoTriggerTimer = null;
 let lastQuizCheckTime = 0;
 
 function checkAndAutoSolveQuiz() {
-  if (isBulkActive || isSolvingQuiz || !autoSolveQuizzes) return;
+  if (isBulkActive || isSolvingQuiz || !autoSolveQuizzes || quizError) return;
 
   const currentCleanUrl = window.location.href.split('?')[0].split('#')[0];
   if (solvedQuizUrls.has(currentCleanUrl)) {
@@ -2385,7 +1949,7 @@ function checkAndAutoSolveQuiz() {
 
     if (quizAutoTriggerTimer) clearTimeout(quizAutoTriggerTimer);
     quizAutoTriggerTimer = setTimeout(() => {
-      if (!isSolvingQuiz && isQuizOnPage() && autoSolveQuizzes) {
+      if (!isSolvingQuiz && !quizError && isQuizOnPage() && autoSolveQuizzes) {
         log('Uncompleted quiz detected! Auto-solving with Green Tick verification...');
         solveLinkedInQuizWithGreenTickRetry().then((ok) => {
           if (ok) solvedQuizUrls.add(currentCleanUrl);
@@ -2401,8 +1965,27 @@ let isRunningAutonomousStep = false;
 let isNavigatingToLesson = false;
 let lastStepRunTime = 0;
 
+let standaloneReturnPending = false;
+
+async function runStandalonePathVideo() {
+  const video = document.querySelector('video');
+  if (!video) return;
+  attachToVideo(video);
+  applySpeed(video, currentSpeed);
+  if (video.ended) {
+    if (standaloneReturnPending || !autoNavigateEnabled) return;
+    standaloneReturnPending = true;
+    try {
+      await new Promise(r => setTimeout(r, 1500));
+      if (isBulkActive && autoNavigateEnabled) await returnToLearningPath();
+    } finally { standaloneReturnPending = false; }
+  } else if (video.paused && (backgroundRun || !document.hidden)) {
+    video.play().catch(() => showHUD('Press Play to allow browser playback.', 'warn'));
+  }
+}
+
 async function runAutonomousStep() {
-  if (!isBulkActive) return;
+  if (!isBulkActive || (!backgroundRun && document.hidden)) return;
   if (isRunningAutonomousStep || isNavigatingToLesson) {
     return;
   }
@@ -2415,6 +1998,11 @@ async function runAutonomousStep() {
 
   try {
     startAudioKeepalive();
+    rememberLearningPath();
+    if (isStandalonePathVideo()) {
+      await runStandalonePathVideo();
+      return;
+    }
 
     // -1. LEARNING PATH CHECK: If on a path overview page, navigate into first uncompleted course
     if (isLearningPathPage()) {
@@ -2443,6 +2031,7 @@ async function runAutonomousStep() {
     if (isQuizOnPage()) {
       // 0a. GREEN TICK CHECK ON QUIZ: If this quiz ALREADY has a green checkmark or is already passed, SKIP IT!
       const alreadyPassed = await verifyQuizGreenTick(800);
+      if (!isBulkActive) return;
       if (alreadyPassed) {
         log('⏩ Quiz already passed with green tick! Skipping to next task...');
         showHUD('⏩ Quiz already completed! Skipping to next task...', 'success');
@@ -2489,6 +2078,7 @@ async function runAutonomousStep() {
         log('Quiz/Assessment detected on page! Solving with AI...');
         showHUD('🧠 Auto-Solving Assessment / Quiz with AI...');
         const solved = await solveLinkedInQuizWithGreenTickRetry();
+        if (!isBulkActive) return;
         if (solved) {
           const returnBtn = findButtonByText(/return to course|back to course|kembali ke kursus|continue learning/i);
           if (returnBtn && isElementClickable(returnBtn)) {
@@ -2551,7 +2141,7 @@ async function runAutonomousStep() {
       await addLog(`🎉 All target items completed! (${completedTarget}/${totalTarget} verified, mode: ${activeFocusMode})`, 'success');
 
       // If we're in a Learning Path workflow, return to path page instead of stopping
-      const pathReturned = await returnToLearningPath();
+      const pathReturned = await finishCourseAndReturnToPath();
       if (pathReturned) {
         // Keep isBulkActive = true so AutoPilot continues on the next course
         return;
@@ -2634,6 +2224,7 @@ async function runAutonomousStep() {
         log('Current item is an Uncompleted Quiz! Solving with AI & Green Tick verification...');
         showHUD('🧠 Auto-Solving Quiz with AI & verifying green tick...');
         const solved = await solveLinkedInQuizWithGreenTickRetry();
+        if (!isBulkActive) return;
         if (solved) {
           log('Quiz passed & verified with green tick! Advancing to next uncompleted task...');
           expandAllSections();
@@ -2666,7 +2257,7 @@ async function runAutonomousStep() {
       const speedToApply = isSpeedEnabled ? targetSpeed : 1;
       applySpeed(video, speedToApply);
 
-      if (video.ended || (video.duration > 0 && video.currentTime >= video.duration - 0.5)) {
+      if (video.ended) {
         log('Video is already ended. Advancing to next item...');
         await handleVideoEnded(currentPath, currentLessonIndex, activeFocusMode);
         return;
@@ -2685,12 +2276,6 @@ async function runAutonomousStep() {
         });
       }
 
-      const onEnded = async () => {
-        video.removeEventListener('ended', onEnded);
-        await handleVideoEnded(currentPath, currentLessonIndex, activeFocusMode);
-      };
-
-      video.addEventListener('ended', onEnded, { once: true });
       return;
     }
 
@@ -2713,9 +2298,11 @@ async function runAutonomousStep() {
 }
 
 async function handleVideoEnded(currentPath, currentLessonIndex, mode = 'pending_only') {
+  if (!isBulkActive || !autoNavigateEnabled) return;
   log('Video ended. Waiting for LinkedIn to award green checkmark...');
   for (let i = 0; i < 5; i++) {
     await new Promise((r) => setTimeout(r, 500));
+    if (!isBulkActive || !autoNavigateEnabled) return;
     expandAllSections();
     const syllabus = getCourseSyllabus();
     const curr = syllabus.find((l) => {
@@ -2730,10 +2317,16 @@ async function handleVideoEnded(currentPath, currentLessonIndex, mode = 'pending
 
   expandAllSections();
   const updatedSyllabus = getCourseSyllabus();
+  const endedLesson = updatedSyllabus.find(l => l.href === currentPath);
+  if (strictCompletionEnabled && !endedLesson?.completed) {
+    showHUD('Waiting for LinkedIn to mark this lesson Viewed.', 'warn');
+    return;
+  }
   await advanceToNextItem(updatedSyllabus, currentLessonIndex, mode);
 }
 
 async function advanceToNextItem(syllabus, currentIdx = -1, mode = 'pending_only') {
+  if (!isBulkActive || !autoNavigateEnabled) return;
   if (!syllabus || syllabus.length === 0) return;
   const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
 
@@ -2777,7 +2370,7 @@ async function advanceToNextItem(syllabus, currentIdx = -1, mode = 'pending_only
     await addLog(`🎉 AutoPilot finished! All ${targetCount} items completed (${mode}).`, 'success');
 
     // If we're in a Learning Path workflow, return to path page instead of stopping
-    const pathReturned = await returnToLearningPath();
+    const pathReturned = await finishCourseAndReturnToPath();
     if (pathReturned) {
       // Keep isBulkActive = true so AutoPilot continues on the next course
       return;
@@ -2811,7 +2404,7 @@ async function advanceToNextUncompletedVideo(syllabus, currentIdx = -1) {
 }
 
 function navigateToLesson(lesson) {
-  if (!lesson) return;
+  if (!isBulkActive || !autoNavigateEnabled || !lesson) return;
   const targetUrl = lesson.fullHref || lesson.href;
   if (!targetUrl) return;
 
@@ -2849,31 +2442,14 @@ function navigateToLesson(lesson) {
 
 // ─── Playback Engine & Anti-Freeze ────────────────────────────────────────────
 
-function configureVideoForSpeed(video, speed) {
-  if (!video) return;
-
-  try {
-    video.preservesPitch = false;
-    video.webkitPreservesPitch = false;
-    video.mozPreservesPitch = false;
-  } catch (e) {}
-
-  if (speed > 2) {
-    if (!video.muted) {
-      previousMuteState = false;
-      video.muted = true;
-    }
-  } else {
-    if (previousMuteState === false && video.muted) {
-      video.muted = false;
-    }
-  }
+function syncPlaybackSettings() {
+  window.postMessage({ type: 'LI_FORCE_SPEED', speed: currentSpeed, enabled: speedInjectionEnabled }, window.location.origin);
+  window.postMessage({ type: 'LI_SET_BACKGROUND_PLAY', enabled: backgroundRun }, window.location.origin);
 }
 
 function applySpeed(video, speed) {
   if (!video) return;
 
-  configureVideoForSpeed(video, speed);
   lastRateChangeTime = Date.now();
 
   // Forward to MAIN world Native Speed Engine in page-inject.js
@@ -2881,17 +2457,13 @@ function applySpeed(video, speed) {
     window.postMessage({
       type: 'LI_FORCE_SPEED',
       speed: speed,
-      enabled: true
-    }, '*');
+      enabled: speedInjectionEnabled
+    }, window.location.origin);
   } catch (e) {}
 
   try {
-    video.playbackRate = speed;
+    video.playbackRate = speedInjectionEnabled ? speed : 1;
   } catch (err) {}
-
-  if (video.paused && !video.ended) {
-    video.play().catch(() => {});
-  }
 
   if (!isBulkActive) {
     try {
@@ -2942,9 +2514,9 @@ function goToNextLesson() {
 
   try {
     // STRICTLY search within the syllabus sidebar TOC! Never query whole document!
-    const sidebar = document.querySelector('#course-contents, [class*="classroom-toc"], ul.classroom-toc');
+    const sidebar = document.querySelector('.classroom-layout-sidebar-body, .classroom-layout__sidebar-body, .classroom-body__sidebar-body, #course-contents, .classroom-toc');
     if (!sidebar) {
-      returnToLearningPath();
+      returnToLearningPath({ allowAutoplay: true });
       return false;
     }
 
@@ -2969,7 +2541,7 @@ function goToNextLesson() {
       return true;
     } else if (currentIndex !== -1 && currentIndex + 1 >= tocLinks.length) {
       log('Reached end of course syllabus in goToNextLesson. Returning to learning path...');
-      returnToLearningPath();
+      returnToLearningPath({ allowAutoplay: true });
       return true;
     }
   } catch (e) {}
@@ -3013,11 +2585,11 @@ function startWatchdog() {
       if (found) {
         attachToVideo(found);
       } else {
-        if (skipNonVideos && autoplayEnabled) {
+        if (skipNonVideos && autoplayEnabled && autoNavigateEnabled) {
           if (!nonVideoTimer) {
             nonVideoTimer = setTimeout(() => {
               nonVideoTimer = null;
-              if (!document.querySelector('video')) {
+              if (skipNonVideos && autoplayEnabled && autoNavigateEnabled && !document.querySelector('video')) {
                 goToNextLesson();
               }
             }, 4000);
@@ -3035,13 +2607,12 @@ function startWatchdog() {
     if (videoEl.ended) return;
 
     const activeTargetRate = isBulkActive ? (currentSpeed || 16) : currentSpeed;
-    if (Date.now() - lastRateChangeTime > 500) {
+    if (speedInjectionEnabled && Date.now() - lastRateChangeTime > 500) {
       if (videoEl.playbackRate !== activeTargetRate) {
         applySpeed(videoEl, activeTargetRate);
       }
     }
 
-    configureVideoForSpeed(videoEl, activeTargetRate);
 
     const now = videoEl.currentTime;
     if (now === lastRecordedTime && !videoEl.paused) {
@@ -3058,7 +2629,7 @@ function startWatchdog() {
       lastRecordedTime = now;
     }
 
-    if (videoEl.paused && !videoEl.ended && (autoplayEnabled || isBulkActive)) {
+    if (videoEl.paused && !videoEl.ended && isBulkActive && (backgroundRun || !document.hidden)) {
       if (videoEl.readyState >= 2) {
         videoEl.play().catch(() => {});
       }
@@ -3088,9 +2659,9 @@ function attachToVideo(video) {
   startAudioKeepalive();
 
   video.addEventListener('ratechange', () => {
-    if (Date.now() - lastRateChangeTime < 300) return;
+    if (!speedInjectionEnabled || Date.now() - lastRateChangeTime < 300) return;
     const rate = isBulkActive ? (currentSpeed || 16) : currentSpeed;
-    if (video.playbackRate !== rate) {
+    if (speedInjectionEnabled && video.playbackRate !== rate) {
       applySpeed(video, rate);
     }
   }, { signal });
@@ -3100,12 +2671,14 @@ function attachToVideo(video) {
       runAutonomousStep();
       return;
     }
-    if (!autoplayEnabled) return;
-    setTimeout(goToNextLesson, 800);
+    if (!autoplayEnabled || !autoNavigateEnabled) return;
+    setTimeout(() => {
+      if (autoplayEnabled && autoNavigateEnabled && videoEl === video && video.ended && !isBulkActive) goToNextLesson();
+    }, 800);
   }, { signal });
 
   video.addEventListener('canplay', () => {
-    if (video.paused && !video.ended && (autoplayEnabled || isBulkActive)) {
+    if (video.paused && !video.ended && isBulkActive && (backgroundRun || !document.hidden)) {
       video.play().catch(() => {});
     }
   }, { signal });
@@ -3117,6 +2690,10 @@ function attachToVideo(video) {
 
 function startObserver() {
   const tryFind = () => {
+    if (videoEl && !videoEl.isConnected) {
+      if (_listenerController) _listenerController.abort();
+      videoEl = null;
+    }
     if (isLearningPathPage()) return;
     const v = document.querySelector('video');
     if (v && v !== videoEl) attachToVideo(v);
@@ -3134,6 +2711,7 @@ let lastMonitoredUrl = window.location.href;
 setInterval(() => {
   if (window.location.href !== lastMonitoredUrl) {
     lastMonitoredUrl = window.location.href;
+    rememberLearningPath();
     log('SPA Navigation detected:', lastMonitoredUrl);
     isNavigatingToLesson = false;
     if (navWatchdogTimer) {
@@ -3153,22 +2731,12 @@ setInterval(() => {
 // ─── Initialization & Persistence ─────────────────────────────────────────────
 
 async function init() {
-  if (document.body) {
-    startObserver();
-    startWatchdog();
-    setTimeout(checkAndAutoSolveQuiz, 1200);
-  } else {
-    document.addEventListener('DOMContentLoaded', () => {
-      startObserver();
-      startWatchdog();
-      setTimeout(checkAndAutoSolveQuiz, 1200);
-    });
-  }
-
-  window.addEventListener('click', startAudioKeepalive, { once: true });
-
   const stored = await chrome.storage.local.get([
     'bulkActive',
+    'speedInjection',
+    'bgPlay',
+    'backgroundRun',
+    'autoNavigate',
     'speed',
     'playbackSpeed',
     'autoplay',
@@ -3182,14 +2750,18 @@ async function init() {
   ]);
 
   if (stored) {
+    speedInjectionEnabled = stored.speedInjection !== false;
+    backgroundRun = stored.bgPlay !== undefined ? !!stored.bgPlay : stored.backgroundRun !== false;
+    autoNavigateEnabled = stored.autoNavigate !== false;
     if (typeof stored.playbackSpeed === 'number') currentSpeed = stored.playbackSpeed;
     else if (typeof stored.speed === 'number') currentSpeed = stored.speed;
+    currentSpeed = Math.min(16, Math.max(0.25, Number(currentSpeed) || 1));
     if (stored.focusMode) focusMode = stored.focusMode;
     if (stored.strictCompletion !== undefined) strictCompletionEnabled = !!stored.strictCompletion;
     if (typeof stored.autoplay === 'boolean') autoplayEnabled = stored.autoplay;
     if (typeof stored.skipNonVideos === 'boolean') skipNonVideos = stored.skipNonVideos;
-    if (typeof stored.autoSolveQuizzes === 'boolean') autoSolveQuizzes = stored.autoSolveQuizzes;
-    else if (typeof stored.autoSolve === 'boolean') autoSolveQuizzes = stored.autoSolve;
+    if (typeof stored.autoSolve === 'boolean') autoSolveQuizzes = stored.autoSolve;
+    else if (typeof stored.autoSolveQuizzes === 'boolean') autoSolveQuizzes = stored.autoSolveQuizzes;
 
     try {
       window.postMessage({
@@ -3221,22 +2793,104 @@ async function init() {
       if (isGlobalNavPage()) {
         log('Init: On off-track global nav page with bulkActive=true. Escaping immediately...');
         setTimeout(() => { returnToLearningPath(); }, 400);
-        return;
       }
       setTimeout(runAutonomousStep, 1000);
     }
   }
+  syncPlaybackSettings();
+  rememberLearningPath();
+  if (document.body) {
+    startObserver();
+    startWatchdog();
+    setTimeout(checkAndAutoSolveQuiz, 1200);
+  } else {
+    document.addEventListener('DOMContentLoaded', () => {
+      startObserver();
+      startWatchdog();
+      setTimeout(checkAndAutoSolveQuiz, 1200);
+    });
+  }
+
+  window.addEventListener('click', startAudioKeepalive, { once: true });
+
 }
 
 init();
 
+function getVisibleLearningPaths() {
+  const seen = new Set();
+  return Array.from(document.querySelectorAll('main h3 a[href*="/learning/paths/"]')).flatMap(link => {
+    let url;
+    try { url = new URL(link.getAttribute('href') || link.href, window.location.href); } catch (e) { return []; }
+    if (url.origin !== window.location.origin || !/^\/learning\/paths\/[^/]+/.test(url.pathname) || seen.has(url.pathname)) return [];
+    seen.add(url.pathname);
+    return [{ title: (link.textContent || '').trim(), url: url.href, completed: false }];
+  });
+}
+
+async function startAllPaths() {
+  if (!autoNavigateEnabled) return { success: false, error: 'Enable Auto-navigation before starting the path queue.' };
+  if (isBulkActive) return { success: false, error: 'Stop the current run before starting a path queue.' };
+  isBulkActive = true;
+  try {
+    // Expand the observed library pagination before freezing the queue.
+    for (let page = 0; page < 30; page++) {
+      const more = Array.from(document.querySelectorAll('main button')).find(b => /show more.*(?:in progress|assigned|recommended|saved).*content/i.test(b.getAttribute('aria-label') || ''));
+      if (!more || !isElementClickable(more)) break;
+      const count = document.querySelectorAll('main h3 a').length;
+      more.click();
+      for (let wait = 0; wait < 20 && document.querySelectorAll('main h3 a').length <= count; wait++) {
+        await new Promise(r => setTimeout(r, 200));
+        if (!isBulkActive) return { success: false, error: 'Queue discovery cancelled.' };
+      }
+      if (document.querySelectorAll('main h3 a').length <= count) return { success: false, error: 'Pagination did not finish loading. Try again after loading more content.' };
+      if (page === 29) return { success: false, error: 'Load remaining content before starting this large queue.' };
+    }
+    const paths = getVisibleLearningPaths();
+    if (!paths.length) return { success: false, error: 'No learning paths found. Open My Content → In progress or Recommended and try again.' };
+    if (!isBulkActive) return { success: false, error: 'Queue discovery cancelled.' };
+    const { pathQueueRunId } = await chrome.storage.local.get(['pathQueueRunId']);
+    if (!isBulkActive) return { success: false, error: 'Queue discovery cancelled.' };
+    await chrome.storage.local.set({ pathQueue: paths, pathQueueIndex: 0, pathQueueActive: true,
+      pathQueueRunId: (pathQueueRunId || 0) + 1, bulkActive: true,
+      learningPathActive: true, lastLearningPathUrl: paths[0].url, focusMode: 'pending_only' });
+    window.location.href = paths[0].url;
+    return { success: true, totalPaths: paths.length };
+  } finally {
+    // The next page restores bulkActive from saved storage.
+    isBulkActive = false;
+  }
+}
+
+async function advancePathQueue() {
+  const { pathQueueActive, pathQueue = [], pathQueueIndex = 0 } = await chrome.storage.local.get(['pathQueueActive', 'pathQueue', 'pathQueueIndex']);
+  if (!pathQueueActive || !isBulkActive || !autoNavigateEnabled) return false;
+  const current = pathQueue[pathQueueIndex];
+  if (!current || new URL(current.url).pathname !== window.location.pathname) return false;
+  current.completed = true;
+  const nextIndex = pathQueueIndex + 1;
+  const next = pathQueue[nextIndex];
+  await chrome.storage.local.set({ pathQueue, pathQueueIndex: nextIndex, pathQueueActive: !!next });
+  if (!next || !isBulkActive || !autoNavigateEnabled) return false;
+  await chrome.storage.local.set({ learningPathActive: true, lastLearningPathUrl: next.url, bulkActive: true });
+  if (!isBulkActive) return false;
+  window.location.href = next.url;
+  return true;
+}
+
 // ─── Messaging (Popup ↔ Content) ─────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'startAllPaths') {
+    startAllPaths().then(sendResponse).catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
   if (message.action === 'startBulkComplete') {
     if (message.focusMode) focusMode = message.focusMode;
-    if (message.speed) currentSpeed = parseFloat(message.speed) || currentSpeed;
+    if (message.speed) currentSpeed = Math.min(16, Math.max(0.25, parseFloat(message.speed) || currentSpeed));
     isBulkActive = true;
+    quizError = null;
+    rememberLearningPath();
     if (window.location.href.includes('/paths/')) {
       learningPathActive = true;
       lastLearningPathUrl = window.location.href;
@@ -3245,7 +2899,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         lastLearningPathUrl: window.location.href
       });
     }
-    chrome.storage.local.set({ bulkActive: true, focusMode, playbackSpeed: currentSpeed });
+    chrome.storage.local.set({ bulkActive: true, pathQueueActive: false, focusMode, playbackSpeed: currentSpeed });
     addLog(`🚀 AutoPilot started (Focus Mode: ${focusMode}, Speed: ${currentSpeed}x)`, 'info');
     runAutonomousStep();
     sendResponse({ success: true });
@@ -3253,11 +2907,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'stopBulkComplete') {
+    quizRunEpoch++;
+    autoSolveQuizzes = false;
     isBulkActive = false;
     learningPathActive = false;
     lastLearningPathUrl = null;
-    chrome.storage.local.set({ bulkActive: false, learningPathActive: false, lastLearningPathUrl: null });
-    applySpeed(videoEl, 1);
+    chrome.storage.local.set({ bulkActive: false, pathQueueActive: false, autoSolve: false, autoSolveQuizzes: false, learningPathActive: false, lastLearningPathUrl: null, pathExamNotice: null });
+    if (nonVideoTimer) clearTimeout(nonVideoTimer);
+    nonVideoTimer = null;
+    if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
+    navWatchdogTimer = null;
+    isNavigatingToLesson = false;
+    syncPlaybackSettings();
     chrome.runtime.sendMessage({ action: 'updateBadge', text: '' });
     addLog('⏹ AutoPilot stopped by user.', 'info');
     sendResponse({ success: true });
@@ -3279,20 +2940,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'setBgPlay') {
+    backgroundRun = !!message.enabled;
+    chrome.storage.local.set({ bgPlay: backgroundRun });
+    syncPlaybackSettings();
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (message.action === 'setAutoNavigate') {
+    autoNavigateEnabled = !!message.enabled;
+    chrome.storage.local.set({ autoNavigate: autoNavigateEnabled });
+    sendResponse({ success: true });
+    return true;
+  }
+
   if (message.action === 'setSpeedInjection') {
-    chrome.storage.local.set({ speedInjection: !!message.enabled });
-    try {
-      window.postMessage({
-        type: 'LI_FORCE_SPEED',
-        speed: message.enabled ? currentSpeed : 1.0,
-        enabled: !!message.enabled
-      }, '*');
-    } catch (e) {}
-    if (!message.enabled) {
-      applySpeed(videoEl, 1);
-    } else {
-      applySpeed(videoEl, currentSpeed);
-    }
+    speedInjectionEnabled = !!message.enabled;
+    chrome.storage.local.set({ speedInjection: speedInjectionEnabled });
+    syncPlaybackSettings();
+    if (speedInjectionEnabled) applySpeed(videoEl, currentSpeed);
     sendResponse({ success: true });
     return true;
   }
@@ -3310,7 +2977,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false, error: 'Invalid speed.' });
       return true;
     }
-    currentSpeed = speed;
+    currentSpeed = Math.min(16, Math.max(0.25, speed));
     applySpeed(videoEl, currentSpeed);
     chrome.runtime.sendMessage({ action: 'setStorage', data: { speed: currentSpeed, playbackSpeed: currentSpeed } });
     sendResponse({ success: true, speed: currentSpeed, isMuted: videoEl ? videoEl.muted : false });
@@ -3381,4 +3048,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
     return true;
   }
+});
+
+
+// Apply popup settings to every open learning tab, including tabs restored later.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes.speedInjection) speedInjectionEnabled = changes.speedInjection.newValue !== false;
+  if (changes.playbackSpeed) currentSpeed = Math.min(16, Math.max(0.25, Number(changes.playbackSpeed.newValue) || 1));
+  if (changes.bgPlay) backgroundRun = changes.bgPlay.newValue !== false;
+  if (changes.autoNavigate) autoNavigateEnabled = changes.autoNavigate.newValue !== false;
+  if (changes.autoplay) autoplayEnabled = changes.autoplay.newValue !== false;
+  if (changes.skipNonVideos) skipNonVideos = changes.skipNonVideos.newValue !== false;
+  if (changes.autoSolve || changes.autoSolveQuizzes) autoSolveQuizzes = (changes.autoSolve || changes.autoSolveQuizzes).newValue !== false;
+  if (changes.focusMode) focusMode = changes.focusMode.newValue || 'pending_only';
+  if (changes.strictCompletion) strictCompletionEnabled = changes.strictCompletion.newValue !== false;
+  if (changes.bulkActive && changes.bulkActive.newValue === false) isBulkActive = false;
+  if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay) syncPlaybackSettings();
 });

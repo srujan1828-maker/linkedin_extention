@@ -1,51 +1,52 @@
-<div align="center">
-  <h1>⚡ LinkedIn Learning — Speed & Autoplay</h1>
-  <p><strong>A clean, open-source browser extension that lets you watch LinkedIn Learning videos at up to 16x speed and automatically advances to the next lesson when a video ends.</strong></p>
-</div>
+# LinkedIn Learning AI AutoPilot
 
-<p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-blue.svg" alt="Version">
-  <img src="https://img.shields.io/badge/platform-LinkedIn%20Learning-0a66c2.svg" alt="Platform">
-  <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License">
-</p>
+A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.1**.
 
-## ✨ Features
+## Installation
 
-| Feature | Detail |
-|---|---|
-| 🚀 **Speed Control** | 13 presets from **0.5x → 16x** via preset buttons or a smooth slider |
-| ⏭ **Auto-play Next Lesson** | When a video ends, the extension automatically clicks the "Next" button |
-| 🔁 **Manual Next** | One-click "Go to Next Lesson Now" button in the popup |
-| 🛡 **Anti-reset Defense** | Counters LinkedIn's player resetting your speed on seek/source-swap |
-| 💾 **Persistent Settings** | Your chosen speed and autoplay preference survive browser restarts |
-| 🔒 **Privacy-safe** | All data stays in your browser. Zero external servers. |
+1. Download the **master** branch and extract the ZIP.
+2. Open `chrome://extensions/` in Chrome, Edge, or Brave and enable **Developer mode**.
+3. Choose **Load unpacked** and select the extracted extension folder.
+4. Open a LinkedIn Learning course. After updating an existing installation, reload the extension and refresh all LinkedIn tabs so both scripts update together.
 
-## 🛠 Installation
+## Controls
 
-1. Download and extract this folder.
-2. Open `chrome://extensions/` in Chrome / Edge / Brave.
-3. Enable **Developer mode** (top-right toggle).
-4. Click **Load unpacked** and select this folder.
-5. Navigate to any `linkedin.com/learning/` course and click the extension icon.
+- **Speed injection:** apply a saved playback speed, bounded to 0.25–16×. Disabling it resets the rate to 1× and returns control to the native player. Actual support and audible sound at extreme speeds depend on the browser.
+- **Background play:** enable visibility handling for background playback. Disabling it restores native visibility reporting. Browser suspension, autoplay restrictions, and OS power saving can still pause a tab.
+- **Auto-navigation:** allow automatic movement between lessons. Turning it off prevents automatic lesson navigation; manual next-lesson controls remain available.
+- **AutoPilot:** start the bulk course workflow in the selected focus mode. Stop cancels pending lesson navigation and clears the saved bulk state. Changing speed alone preserves pause, mute, and pitch preferences.
+- **AI providers:** optionally configure Gemini, Groq, OpenRouter, or NVIDIA credentials in the popup. Identical in-flight prompts share a request; different prompts receive independent responses.
 
-## 🎛 How to Use
+Saved settings load before player observation and update across open tabs. The extension preserves real playback rates, including speeds below 1×, and attaches to replacement videos during page navigation.
 
-- **Speed presets**: Click any of the 13 speed buttons (0.5x, 0.75x, 1x … 16x).
-- **Slider**: Drag the slider for fine-grained control.
-- **Auto-advance toggle**: Click the ON/OFF toggle. When **ON**, the extension clicks "Next Lesson" automatically when a video finishes.
-- **Next Lesson button**: Jump to the next lesson manually at any time.
+## Running learning paths
 
-> **Note**: Speeds above 2x are not available in LinkedIn's native player UI — this extension bypasses that restriction directly via the HTML5 `video.playbackRate` property.
+Open **LinkedIn Learning → My Content → In progress** (or Recommended / Assigned) and click **Run All Paths in My Content** in the popup. It expands the list's **Show more** buttons, collects path headings, and saves a queue for the paths in that list. Switch library sections and run again to process paths in another section. Enable Auto-navigation first.
 
-## 🔐 Permissions
+The queue uses pending-only mode. It opens each path's unfinished items in order, preserves the path and organization URL context, and returns to the overview after each course or standalone video. Standalone items play only their linked video. A path advances only after all its item cards show LinkedIn's explicit **Completed** status. The queue persists across page loads; Stop cancels it and pending quiz actions. Ordinary autoplay also returns to the remembered path after the last lesson. Return navigation uses the saved queue, a valid back-link URL even in a hidden sidebar, saved path state, or a same-site path referrer.
 
-| Permission | Why |
-|---|---|
-| `storage` | Save your speed and autoplay settings |
-| `tabs` | Detect which tab is on LinkedIn Learning |
-| `activeTab` | Send messages to the active tab's content script |
-| `https://www.linkedin.com/learning/*` | Only runs on LinkedIn Learning pages |
+For quizzes, enable AI assistance and configure a provider key. The solver reads the active chapter question, validates exact option text / zero-based indices, clicks each native input once, verifies selection, and submits only through an enabled button. Missing keys, API failures, invalid answers, or failed selection pause the run. A generic results heading or another completed quiz cannot verify the current quiz. AI correctness remains dependent on the provider.
 
-## ⚖ Disclaimer
+Summative final exams require manual completion. After course lessons finish, the extension returns to the path first. If the path still shows that course as unfinished and it has a final exam, the run pauses there and tells you to check the exam before restarting. The queue covers paths listed in the selected library section, not every path in LinkedIn's catalog.
 
-This extension does not mark lessons as complete, manipulate progress, or make any API calls. It only controls the HTML5 video player in your browser. Use responsibly.
+## Privacy and limitations
+
+Settings and API keys are stored in local browser extension storage. When AI assistance is used, the constructed question prompt and course context are sent to the configured external AI provider. Review the provider's data handling policy before use. Local extension storage is not a dedicated encrypted credential vault.
+
+LinkedIn completion indicators and navigation depend on the current page markup. AI answers can be wrong, and this extension cannot guarantee a completion badge or certificate. It does not directly edit LinkedIn progress through an API. Follow applicable course and assessment rules.
+
+The scripts currently match LinkedIn pages broadly to support the existing course/path navigation workflow. Only run AutoPilot on the learning workflow you intend to control.
+
+## Verification
+
+Run with Node.js 18 or later, without installing dependencies:
+
+```sh
+node --test tests/regression.test.cjs
+node --check content.js
+node --check page-inject.js
+node --check background.js
+node --check popup.js
+```
+
+The regression tests use mocked browser and extension APIs. They cover settings, playback preferences, Stop cancellation, AI request isolation, active-question parsing, invalid-answer rejection, single-click input selection, path card extraction, context preservation, and queue progress. The current path, sidebar, standalone-player, library-pagination, and chapter-quiz markup were inspected in signed-in LinkedIn Learning. Full path completion and live AI submissions have not been tested end to end.
