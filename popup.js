@@ -652,7 +652,7 @@ ${escapeHtml(data.rawResponse || '')}
   document.getElementById('btn-all-paths')?.addEventListener('click', async () => {
     updateProgressBar(0, 'Discovering learning paths...');
     const res = await sendToContent({ action: 'startAllPaths' });
-    if (res?.success) updateProgressBar(0, `Queued ${res.totalPaths} learning paths.`);
+    if (res?.success) updateProgressBar(0, res.message || `Queued ${res.totalPaths} learning paths.`);
     else {
       hideProgressBar();
       const data = await chrome.storage.local.get(['activityLogs']);

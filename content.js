@@ -33,6 +33,9 @@ let quizError = null;
 let quizErrorUrl = null;
 let quizAutoPaused = false;
 let isQuizWorkflowRunning = false;
+let isDiscoveringPathQueue = false;
+let quizContinuationInFlight = false;
+const continuedQuizUrls = new Set();
 let videoEl = null;
 let watchdogInterval = null;
 let lastRecordedTime = -1;
@@ -1526,6 +1529,8 @@ async function solveLinkedInQuiz() {
 
       if (!currentQ || currentQ.options.length < 2) {
         const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
+        const resultRoot = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge');
+        if (/\b(?:you passed|quiz passed|assessment complete|(?:you.ve |you have )?completed (?:the |this )?quiz|quiz completed?)\b/i.test(resultRoot?.innerText || '')) break;
         const isFailedScreen = /keep practicing|retake the quiz|take the quiz again|try again|review your answers|answered \d+ of \d+ questions correctly/i.test(bodyText);
 
         // If quiz was NOT passed, NEVER click continue! Trigger retake or review!
@@ -1769,6 +1774,7 @@ async function solveLinkedInQuiz() {
     isSolvingQuiz = false;
     return true;
   } catch (err) {
+    if (runEpoch !== quizRunEpoch) return false;
     log('Quiz solver error:', err);
     showHUD('❌ Quiz solver error: ' + err.message, 'error');
     quizError = err.message;
@@ -1798,11 +1804,53 @@ async function verifyQuizGreenTick(maxWaitMs = 5000, quizPath = window.location.
     // A different completed quiz or a generic “Results” heading is insufficient.
     if (window.location.pathname === quizPath) {
       const root = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge');
-      if (/\b(?:you passed|quiz passed|assessment complete)\b/i.test(root?.innerText || '')) return true;
+      if (/\b(?:you passed|quiz passed|assessment complete|(?:you.ve |you have )?completed (?:the |this )?quiz|quiz completed?)\b/i.test(root?.innerText || '')) return true;
     }
     await new Promise(r => setTimeout(r, 600));
   }
   return false;
+}
+
+async function continueAfterQuiz(quizPath = window.location.pathname, epoch = quizRunEpoch) {
+  const allowed = () => epoch === quizRunEpoch && !quizAutoPaused && autoNavigateEnabled &&
+    !isDiscoveringPathQueue && (isBulkActive || autoplayEnabled);
+  if (!allowed() || quizContinuationInFlight || continuedQuizUrls.has(quizPath)) return false;
+  if (window.location.pathname !== quizPath) return true;
+  quizContinuationInFlight = true;
+  try {
+    const stored = await chrome.storage.local.get(['focusMode']);
+    if (!allowed()) return false;
+    const mode = isBulkActive ? (stored.focusMode || focusMode) : 'pending_only';
+    expandAllSections();
+    const syllabus = getCourseSyllabus().map(item => item.href === quizPath ? {...item, completed:true} : item);
+    const eligible = item => !item.completed && item.href !== quizPath &&
+      (mode === 'videos_only' ? item.isVideo : mode === 'quizzes_only' ? item.isQuiz : true);
+    const index = syllabus.findIndex(item => item.href === quizPath);
+    const next = syllabus.slice(index + 1).find(eligible) || syllabus.find(eligible);
+    if (next) {
+      if (!allowed()) return false;
+      if (navigateToLesson(next, {allowAutoplay:true})) {
+        continuedQuizUrls.add(quizPath);
+        return true;
+      }
+    }
+    if (syllabus.length && !syllabus.some(eligible)) {
+      const returned = isBulkActive ? await finishCourseAndReturnToPath() : await returnToLearningPath({allowAutoplay:true});
+      if (!allowed()) return returned;
+      if (!returned && isBulkActive) {
+        isBulkActive = false;
+        await chrome.storage.local.set({bulkActive:false});
+        sendProgress({isDone:true,isRunning:false,percent:100,message:'All course items completed.'});
+      }
+      continuedQuizUrls.add(quizPath);
+      return true;
+    }
+    const root = document.querySelector('.chapter-quiz, .classroom-quiz, .quiz-challenge');
+    const button = root && Array.from(root.querySelectorAll('button, a[role="button"]')).find(el =>
+      /^(?:return to course|back to course|continue learning|next lesson|continue)$/i.test((el.innerText || '').trim()) && isElementClickable(el));
+    if (button && allowed()) { button.click(); continuedQuizUrls.add(quizPath); return true; }
+    return false;
+  } finally { quizContinuationInFlight = false; }
 }
 
 async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
@@ -1811,6 +1859,7 @@ async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
   try {
     const retryEpoch = quizRunEpoch;
     const quizPath = window.location.pathname;
+    continuedQuizUrls.delete(quizPath);
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       if (retryEpoch !== quizRunEpoch) return false;
@@ -1831,14 +1880,8 @@ async function solveLinkedInQuizWithGreenTickRetry(maxRetries = 5) {
         showHUD('✅ Verified! Quiz completed.', 'success');
         sendProgress({ message: '🎉 Chapter Quiz verified!' });
 
-        // Click lingering "Return to course" or "Submit and continue" now that quiz is verified
-        const lingeringSubmit = findButtonByText(/return to course|back to course|kembali ke kursus|submit and continue|next lesson/i);
-        if (lingeringSubmit && isElementClickable(lingeringSubmit) && !isForbiddenQuizButton(lingeringSubmit)) {
-          log('Clicking final return / continue button:', lingeringSubmit.innerText);
-          if (retryEpoch !== quizRunEpoch) return false;
-          clickElement(lingeringSubmit);
-          await new Promise((r) => setTimeout(r, 2000));
-        }
+        solvedQuizUrls.add(window.location.origin + quizPath);
+        await continueAfterQuiz(quizPath, retryEpoch);
         return true;
       }
 
@@ -1910,16 +1953,16 @@ let lastQuizCheckTime = 0;
 function checkAndAutoSolveQuiz() {
   const currentCleanUrl = window.location.href.split('?')[0].split('#')[0];
   if (quizErrorUrl && quizErrorUrl !== currentCleanUrl) { quizError = null; quizErrorUrl = null; }
-  if (isBulkActive || isSolvingQuiz || isQuizWorkflowRunning || quizAutoPaused || !autoSolveQuizzes || quizError) return;
+  if (isDiscoveringPathQueue || isBulkActive || isSolvingQuiz || isQuizWorkflowRunning || quizAutoPaused || !autoSolveQuizzes || quizError) return;
   if (!isQuizOnPage()) return;
   const active = hasActiveQuizQuestion() || hasPendingQuizStart();
-  if (!active && solvedQuizUrls.has(currentCleanUrl)) return;
+  if (!active && solvedQuizUrls.has(currentCleanUrl)) { continueAfterQuiz(window.location.pathname); return; }
   const now = Date.now();
   if (now - lastQuizCheckTime < 2000 || quizAutoTriggerTimer) return;
   lastQuizCheckTime = now;
   if (!active) {
     const quizItem = getCourseSyllabus().find(l => l.href === window.location.pathname);
-    if (quizItem?.completed) { solvedQuizUrls.add(currentCleanUrl); return; }
+    if (quizItem?.completed) { solvedQuizUrls.add(currentCleanUrl); continueAfterQuiz(window.location.pathname); return; }
   }
   const epoch = quizRunEpoch;
   quizAutoTriggerTimer = setTimeout(() => {
@@ -1959,7 +2002,7 @@ async function runStandalonePathVideo() {
 }
 
 async function runAutonomousStep() {
-  if (!isBulkActive || (!backgroundRun && document.hidden)) return;
+  if (isDiscoveringPathQueue || !isBulkActive || (!backgroundRun && document.hidden)) return;
   if (isRunningAutonomousStep || isNavigatingToLesson) {
     return;
   }
@@ -2010,22 +2053,7 @@ async function runAutonomousStep() {
         log('⏩ Quiz already passed with green tick! Skipping to next task...');
         showHUD('⏩ Quiz already completed! Skipping to next task...', 'success');
 
-        const returnBtn = findButtonByText(/return to course|back to course|kembali ke kursus|submit and continue|continue learning|^continue$/i);
-        if (returnBtn && isElementClickable(returnBtn)) {
-          clickElement(returnBtn);
-          await new Promise((r) => setTimeout(r, 1500));
-        }
-
-        expandAllSections();
-        const syllabus = getCourseSyllabus();
-        const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
-        const currentLessonIndex = syllabus.findIndex((l) => {
-          const h = (l.href || '').toLowerCase();
-          return h.includes(currentPath) || currentPath.includes(h);
-        });
-        const storedConfig = await chrome.storage.local.get(['focusMode']);
-        const activeFocusMode = storedConfig.focusMode || focusMode || 'pending_only';
-        await advanceToNextItem(syllabus, currentLessonIndex, activeFocusMode);
+        await continueAfterQuiz(window.location.pathname);
         return;
       }
 
@@ -2051,16 +2079,7 @@ async function runAutonomousStep() {
       if (autoSolve) {
         log('Quiz/Assessment detected on page! Solving with AI...');
         showHUD('🧠 Auto-Solving Assessment / Quiz with AI...');
-        const solved = await solveLinkedInQuizWithGreenTickRetry();
-        if (!isBulkActive) return;
-        if (solved) {
-          const returnBtn = findButtonByText(/return to course|back to course|kembali ke kursus|continue learning/i);
-          if (returnBtn && isElementClickable(returnBtn)) {
-            log('Returning to course from assessment:', returnBtn.innerText);
-            clickElement(returnBtn);
-            await new Promise((r) => setTimeout(r, 2500));
-          }
-        }
+        await solveLinkedInQuizWithGreenTickRetry();
         return;
       }
     }
@@ -2197,14 +2216,7 @@ async function runAutonomousStep() {
       if (autoSolve) {
         log('Current item is an Uncompleted Quiz! Solving with AI & Green Tick verification...');
         showHUD('🧠 Auto-Solving Quiz with AI & verifying green tick...');
-        const solved = await solveLinkedInQuizWithGreenTickRetry();
-        if (!isBulkActive) return;
-        if (solved) {
-          log('Quiz passed & verified with green tick! Advancing to next uncompleted task...');
-          expandAllSections();
-          const updatedSyllabus = getCourseSyllabus();
-          await advanceToNextItem(updatedSyllabus, currentLessonIndex, activeFocusMode);
-        }
+        await solveLinkedInQuizWithGreenTickRetry();
         return;
       }
     }
@@ -2377,16 +2389,19 @@ async function advanceToNextUncompletedVideo(syllabus, currentIdx = -1) {
   return advanceToNextItem(syllabus, currentIdx, 'videos_only');
 }
 
-function navigateToLesson(lesson) {
-  if (!isBulkActive || !autoNavigateEnabled || !lesson) return;
+function navigateToLesson(lesson, {allowAutoplay = false} = {}) {
+  const epoch = quizRunEpoch;
+  const allowed = () => epoch === quizRunEpoch && !quizAutoPaused && autoNavigateEnabled &&
+    !isDiscoveringPathQueue && (isBulkActive || (allowAutoplay && autoplayEnabled));
+  if (!allowed() || !lesson) return false;
   const targetUrl = lesson.fullHref || lesson.href;
-  if (!targetUrl) return;
+  if (!targetUrl) return false;
 
   // Block any accidental navigation to certificates
   if (/\b(?:certificates?|sertifikat)\b/i.test(targetUrl)) {
     log('Blocked navigation to certificates link! Returning to learning path instead...');
-    returnToLearningPath();
-    return;
+    returnToLearningPath({allowAutoplay});
+    return false;
   }
 
   log('Navigating to lesson:', lesson.title, '->', targetUrl);
@@ -2397,7 +2412,7 @@ function navigateToLesson(lesson) {
     isNavigatingToLesson = false;
     const currentClean = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
     const targetClean = lesson.href.split('?')[0].split('#')[0].toLowerCase();
-    if (isBulkActive && !currentClean.includes(targetClean) && !targetClean.includes(currentClean)) {
+    if (allowed() && currentClean !== targetClean) {
       log('Navigation timeout. Forcing window.location:', targetUrl);
       window.location.href = targetUrl;
     }
@@ -2412,6 +2427,7 @@ function navigateToLesson(lesson) {
   } catch (e) {
     window.location.href = targetUrl;
   }
+  return true;
 }
 
 // ─── Playback Engine & Anti-Freeze ────────────────────────────────────────────
@@ -2536,11 +2552,12 @@ function startWatchdog() {
   if (watchdogInterval) clearInterval(watchdogInterval);
 
   watchdogInterval = setInterval(() => {
+    if (isDiscoveringPathQueue) return;
     // Handle player surveys during ordinary autoplay as well as AutoPilot.
     if (dismissSurveyIfPresent()) return;
 
     if (isBulkActive) {
-      if (isRunningAutonomousStep || isNavigatingToLesson || isSolvingQuiz) {
+      if (isRunningAutonomousStep || isNavigatingToLesson || isSolvingQuiz || isQuizWorkflowRunning) {
         return;
       }
       if (isGlobalNavPage()) {
@@ -2552,7 +2569,7 @@ function startWatchdog() {
         runAutonomousStep();
         return;
       }
-      if (!videoEl || videoEl.ended || videoEl.paused) {
+      if (isQuizOnPage() || !videoEl || videoEl.ended || videoEl.paused) {
         runAutonomousStep();
       }
       return;
@@ -2674,6 +2691,7 @@ function attachToVideo(video) {
 
 function startObserver() {
   const tryFind = () => {
+    if (isDiscoveringPathQueue) return;
     if (dismissSurveyIfPresent()) return;
     if (!isBulkActive) checkAndAutoSolveQuiz();
     if (videoEl && !videoEl.isConnected) {
@@ -2722,6 +2740,7 @@ setInterval(() => {
 async function init() {
   const stored = await chrome.storage.local.get([
     'bulkActive',
+    'pathQueueDiscoveryActive',
     'speedInjection',
     'bgPlay',
     'backgroundRun',
@@ -2773,7 +2792,7 @@ async function init() {
       });
     }
 
-    if (stored.bulkActive === true) {
+    if (stored.bulkActive === true && !stored.pathQueueDiscoveryActive) {
       log('Resuming autonomous bulk course completion...');
       if (learningPathActive) {
         log('Learning Path mode active. Path URL:', lastLearningPathUrl);
@@ -2788,6 +2807,13 @@ async function init() {
   }
   syncPlaybackSettings();
   rememberLearningPath();
+  if (stored.pathQueueDiscoveryActive) {
+    isDiscoveringPathQueue = true;
+    const discoveryEpoch = quizRunEpoch;
+    setTimeout(() => {
+      if (isDiscoveringPathQueue && !quizAutoPaused && discoveryEpoch === quizRunEpoch) return startAllPaths({resumeDiscovery:true});
+    }, 500);
+  }
   if (document.body) {
     startObserver();
     startWatchdog();
@@ -2808,49 +2834,123 @@ init();
 
 function getVisibleLearningPaths() {
   const seen = new Set();
-  return Array.from(document.querySelectorAll('main h3 a[href*="/learning/paths/"]')).flatMap(link => {
-    let url;
-    try { url = new URL(link.getAttribute('href') || link.href, window.location.href); } catch (e) { return []; }
-    if (url.origin !== window.location.origin || !/^\/learning\/paths\/[^/]+/.test(url.pathname) || seen.has(url.pathname)) return [];
-    seen.add(url.pathname);
-    return [{ title: (link.textContent || '').trim(), url: url.href, completed: false }];
+  const links = [
+    ...document.querySelectorAll('main h3 a[href*="/learning/paths/"]'),
+    ...document.querySelectorAll('main h2 a[href*="/learning/paths/"], main h4 a[href*="/learning/paths/"]'),
+    ...document.querySelectorAll('main a[href*="/learning/paths/"]')
+  ];
+  return links.flatMap(link => {
+    const url = validLearningPathUrl(link.getAttribute('href') || link.href);
+    if (!url || seen.has(new URL(url).pathname)) return [];
+    seen.add(new URL(url).pathname);
+    return [{title: (link.textContent || link.getAttribute('aria-label') || '').trim(), url, completed:false}];
   });
 }
 
-async function startAllPaths() {
-  if (!autoNavigateEnabled) return { success: false, error: 'Enable Auto-navigation before starting the path queue.' };
-  if (isBulkActive) return { success: false, error: 'Stop the current run before starting a path queue.' };
-  isBulkActive = true;
+function librarySectionUrl(raw) {
+  try {
+    const url = new URL(raw, window.location.href);
+    return url.origin === window.location.origin &&
+      /^\/learning\/me\/my-library\/(?:in-progress|saved|assigned|recommended)\/?$/.test(url.pathname) ? url.href : null;
+  } catch (e) { return null; }
+}
+
+function libraryItemCount() {
+  return document.querySelectorAll('main h3 a').length || document.querySelectorAll('main h2 a, main h4 a').length;
+}
+
+async function startAllPaths({resumeDiscovery = false} = {}) {
+  if (!autoNavigateEnabled) {
+    if (resumeDiscovery) { isDiscoveringPathQueue = false; await chrome.storage.local.set({pathQueueDiscoveryActive:false}); }
+    return {success:false, error:'Enable Auto-navigation before starting the path queue.'};
+  }
+  if (isDiscoveringPathQueue && !resumeDiscovery) return {success:true, discovering:true, message:'Path discovery is already running.'};
+  const epoch = ++quizRunEpoch;
+  isDiscoveringPathQueue = true;
+  isBulkActive = false;
   quizAutoPaused = false;
   quizError = null; quizErrorUrl = null;
+  if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
+  navWatchdogTimer = null; isNavigatingToLesson = false;
+  const active = () => epoch === quizRunEpoch && isDiscoveringPathQueue && !quizAutoPaused && autoNavigateEnabled;
+  const redirect = url => setTimeout(() => {
+    if (epoch === quizRunEpoch && !quizAutoPaused && autoNavigateEnabled) window.location.href = url;
+  }, 150);
   try {
-    // Expand the observed library pagination before freezing the queue.
-    for (let page = 0; page < 30; page++) {
-      const more = Array.from(document.querySelectorAll('main button')).find(b => /show more.*(?:in progress|assigned|recommended|saved).*content/i.test(b.getAttribute('aria-label') || ''));
-      if (!more || !isElementClickable(more)) break;
-      const count = document.querySelectorAll('main h3 a').length;
-      more.click();
-      for (let wait = 0; wait < 20 && document.querySelectorAll('main h3 a').length <= count; wait++) {
-        await new Promise(r => setTimeout(r, 200));
-        if (!isBulkActive) return { success: false, error: 'Queue discovery cancelled.' };
-      }
-      if (document.querySelectorAll('main h3 a').length <= count) return { success: false, error: 'Pagination did not finish loading. Try again after loading more content.' };
-      if (page === 29) return { success: false, error: 'Load remaining content before starting this large queue.' };
+    const stored = await chrome.storage.local.get(['pathQueueDiscovery', 'pathQueueRunId']);
+    if (!active()) return {success:false, error:'Path discovery cancelled.'};
+    const discovery = resumeDiscovery && stored.pathQueueDiscovery ? stored.pathQueueDiscovery : {sections:[], visited:[], paths:[]};
+    await chrome.storage.local.set({bulkActive:false, pathQueueActive:false, pathQueueDiscoveryActive:true});
+    if (!active()) return {success:false, error:'Path discovery cancelled.'};
+    const currentSection = librarySectionUrl(window.location.href);
+    if (!currentSection) {
+      const library = new URL('/learning/me/my-library/in-progress', window.location.href);
+      const org = new URL(window.location.href).searchParams.get('u');
+      if (org) library.searchParams.set('u', org);
+      discovery.sections = [library.href];
+      await chrome.storage.local.set({pathQueueDiscovery:discovery});
+      if (!active()) return {success:false, error:'Path discovery cancelled.'};
+      redirect(library.href);
+      return {success:true, discovering:true, message:'Opening My Content to collect learning paths...'};
     }
-    const paths = getVisibleLearningPaths();
-    if (!paths.length) return { success: false, error: 'No learning paths found. Open My Content → In progress or Recommended and try again.' };
-    if (!isBulkActive) return { success: false, error: 'Queue discovery cancelled.' };
-    const { pathQueueRunId } = await chrome.storage.local.get(['pathQueueRunId']);
-    if (!isBulkActive) return { success: false, error: 'Queue discovery cancelled.' };
-    await chrome.storage.local.set({ pathQueue: paths, pathQueueIndex: 0, pathQueueActive: true,
-      pathQueueRunId: (pathQueueRunId || 0) + 1, bulkActive: true,
-      learningPathActive: true, lastLearningPathUrl: paths[0].url, focusMode: 'pending_only' });
-    window.location.href = paths[0].url;
-    return { success: true, totalPaths: paths.length };
-  } finally {
-    // The next page restores bulkActive from saved storage.
-    isBulkActive = false;
-  }
+    for (let wait = 0; wait < 25 && !libraryItemCount() && !getVisibleLearningPaths().length; wait++) {
+      const text = document.querySelector('main')?.innerText || document.body?.innerText || '';
+      if (/don.t have|no (?:saved|in progress|recommended|assigned|outstanding)|nothing (?:saved|here)|no content/i.test(text)) break;
+      await new Promise(r => setTimeout(r, 200));
+      if (!active()) return {success:false, error:'Path discovery cancelled.'};
+      if (wait === 24) throw new Error('My Content is still loading. Wait for the list, then start All Paths again.');
+    }
+    const sections = [currentSection, ...Array.from(document.querySelectorAll('a[href*="/learning/me/my-library/"]'))
+      .map(link => librarySectionUrl(link.getAttribute('href') || link.href)).filter(Boolean)];
+    for (const url of sections) {
+      if (!discovery.sections.some(existing => new URL(existing).pathname === new URL(url).pathname)) discovery.sections.push(url);
+    }
+    for (let page = 0; page < 30; page++) {
+      const more = Array.from(document.querySelectorAll('main button')).find(button =>
+        /show more.*(?:in[-\s]+progress|assigned|recommended|saved).*content/i.test(button.getAttribute('aria-label') || '') ||
+        /^show more$/i.test((button.innerText || '').trim()));
+      if (!more) break;
+      for (let wait = 0; wait < 20 && !isElementClickable(more); wait++) {
+        await new Promise(r => setTimeout(r, 200));
+        if (!active()) return {success:false, error:'Path discovery cancelled.'};
+      }
+      if (!isElementClickable(more)) throw new Error('Show more is unavailable. Wait for My Content to finish loading, then retry.');
+      const count = libraryItemCount(); more.click();
+      for (let wait = 0; wait < 20 && libraryItemCount() <= count; wait++) {
+        await new Promise(r => setTimeout(r, 200));
+        if (!active()) return {success:false, error:'Path discovery cancelled.'};
+      }
+      if (libraryItemCount() <= count) throw new Error('Show more did not finish loading. Try All Paths again after the list loads.');
+      if (page === 29) throw new Error('Load the remaining content before starting this large queue.');
+    }
+    for (const path of getVisibleLearningPaths()) {
+      if (!discovery.paths.some(existing => new URL(existing.url).pathname === new URL(path.url).pathname)) discovery.paths.push(path);
+    }
+    const currentPath = new URL(currentSection).pathname;
+    if (!discovery.visited.includes(currentPath)) discovery.visited.push(currentPath);
+    const nextSection = discovery.sections.find(url => !discovery.visited.includes(new URL(url).pathname));
+    if (nextSection) {
+      await chrome.storage.local.set({pathQueueDiscovery:discovery});
+      if (!active()) return {success:false, error:'Path discovery cancelled.'};
+      redirect(nextSection);
+      return {success:true, discovering:true, totalPaths:discovery.paths.length, message:'Found ' + discovery.paths.length + ' paths. Checking the next My Content section...'};
+    }
+    if (!discovery.paths.length) throw new Error('No learning paths were found in your available My Content lists.');
+    if (!active()) return {success:false, error:'Path discovery cancelled.'};
+    const paths = discovery.paths;
+    await chrome.storage.local.set({pathQueue:paths, pathQueueIndex:0, pathQueueActive:true,
+      pathQueueRunId:(stored.pathQueueRunId || 0) + 1, pathQueueDiscoveryActive:false, pathQueueDiscovery:null,
+      bulkActive:true, learningPathActive:true, lastLearningPathUrl:paths[0].url, focusMode:'pending_only'});
+    if (!active()) return {success:false, error:'Path discovery cancelled.'};
+    await addLog('Queued ' + paths.length + ' learning paths from My Content.', 'success');
+    redirect(paths[0].url);
+    return {success:true, totalPaths:paths.length};
+  } catch (error) {
+    if (epoch === quizRunEpoch) await chrome.storage.local.set({pathQueueDiscoveryActive:false, bulkActive:false});
+    await addLog(error.message, 'error');
+    sendProgress({error:true, message:error.message});
+    return {success:false, error:error.message};
+  } finally { isDiscoveringPathQueue = false; }
 }
 
 async function advancePathQueue() {
@@ -2877,10 +2977,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.action === 'startBulkComplete') {
+    quizRunEpoch++;
+    isDiscoveringPathQueue = false;
     if (message.focusMode) focusMode = message.focusMode;
     if (message.speed) currentSpeed = Math.min(16, Math.max(0.25, parseFloat(message.speed) || currentSpeed));
     isBulkActive = true;
     quizError = null; quizErrorUrl = null; quizAutoPaused = false;
+    continuedQuizUrls.clear();
     rememberLearningPath();
     if (window.location.href.includes('/paths/')) {
       learningPathActive = true;
@@ -2890,7 +2993,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         lastLearningPathUrl: window.location.href
       });
     }
-    chrome.storage.local.set({ bulkActive: true, pathQueueActive: false, focusMode, playbackSpeed: currentSpeed });
+    chrome.storage.local.set({ bulkActive: true, pathQueueActive: false, pathQueueDiscoveryActive: false, pathQueueDiscovery: null, focusMode, playbackSpeed: currentSpeed });
     addLog(`🚀 AutoPilot started (Focus Mode: ${focusMode}, Speed: ${currentSpeed}x)`, 'info');
     runAutonomousStep();
     sendResponse({ success: true });
@@ -2900,12 +3003,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'stopBulkComplete') {
     quizRunEpoch++;
     quizAutoPaused = true;
+    isDiscoveringPathQueue = false;
     if (quizAutoTriggerTimer) clearTimeout(quizAutoTriggerTimer);
     quizAutoTriggerTimer = null;
     isBulkActive = false;
     learningPathActive = false;
     lastLearningPathUrl = null;
-    chrome.storage.local.set({ bulkActive: false, pathQueueActive: false, learningPathActive: false, lastLearningPathUrl: null, pathExamNotice: null });
+    chrome.storage.local.set({ bulkActive: false, pathQueueActive: false, pathQueueDiscoveryActive: false, pathQueueDiscovery: null, learningPathActive: false, lastLearningPathUrl: null, pathExamNotice: null });
     if (nonVideoTimer) clearTimeout(nonVideoTimer);
     nonVideoTimer = null;
     if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
