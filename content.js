@@ -693,69 +693,37 @@ async function finishCourseAndReturnToPath() {
  * by clicking "Skip survey", "No thanks", "Dismiss", or similar dismiss buttons.
  * Returns true if a survey was found and dismissed.
  */
+const surveySkipAttempts = new WeakMap();
+
+function shouldAutoSkipSurvey() {
+  return !quizAutoPaused && (isBulkActive || (autoplayEnabled && autoNavigateEnabled && skipNonVideos));
+}
+
 function dismissSurveyIfPresent() {
-  // Check if a survey/feedback overlay is visible on the page
-  const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
-  const hasSurvey =
-    /how confident are you/i.test(bodyText) ||
-    /help us improve/i.test(bodyText) ||
-    /skip survey/i.test(bodyText) ||
-    /rate this course/i.test(bodyText) ||
-    /rate your experience/i.test(bodyText) ||
-    /provide feedback/i.test(bodyText) ||
-    /would you recommend/i.test(bodyText) ||
-    /not very confident.*very confident/i.test(bodyText);
-
-  if (!hasSurvey) return false;
-
-  // Try to find and click "Skip survey" or similar dismiss buttons
-  const dismissPatterns = [
-    /^skip survey$/i,
-    /^skip$/i,
-    /^no thanks$/i,
-    /^dismiss$/i,
-    /^close$/i,
-    /^not now$/i,
-    /^lewati survei$/i,        // Indonesian
-    /^lewati$/i,
-    /^omitir encuesta$/i,      // Spanish
-    /^passer le sondage$/i,    // French
-    /^umfrage überspringen$/i  // German
-  ];
-
-  const allClickable = Array.from(document.querySelectorAll(
-    'button, a, [role="button"], span[tabindex], div[tabindex], [class*="skip"], [class*="dismiss"], [class*="close"]'
-  ));
-
-  for (const pattern of dismissPatterns) {
-    for (const el of allClickable) {
-      if (isLanguageElement(el)) continue;
-      const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
-      if (pattern.test(text) && isElementClickable(el)) {
-        log('Survey detected! Clicking:', text);
-        showHUD('⏭️ Skipping survey...', 'info');
-        clickElement(el);
-        return true;
-      }
+  if (!shouldAutoSkipSurvey()) return false;
+  const explicit = /^(?:skip survey|lewati survei|omitir encuesta|passer le sondage|umfrage überspringen)$/i;
+  const generic = /^(?:skip|no thanks|dismiss|close|not now|lewati)$/i;
+  const surveyPrompt = /how confident are you.*(?:learned|course)|rate (?:this course|your experience)|would you recommend.*course|not very confident.*very confident/i;
+  const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], [tabindex]'));
+  for (const candidate of candidates) {
+    if (isLanguageElement(candidate) || !isElementClickable(candidate) || candidate.getClientRects().length === 0) continue;
+    const text = (candidate.innerText || candidate.textContent || '').replace(/\s+/g, ' ').trim();
+    const aria = (candidate.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    let matches = explicit.test(text) || explicit.test(aria);
+    if (!matches && (generic.test(text) || generic.test(aria) || /^(?:close|dismiss) (?:survey|feedback)$/i.test(aria))) {
+      const survey = candidate.closest('[class*="survey"], [class*="feedback"], [role="dialog"]');
+      matches = !!survey && surveyPrompt.test((survey.innerText || '').replace(/\s+/g, ' '));
     }
+    if (!matches) continue;
+    const lastAttempt = surveySkipAttempts.get(candidate);
+    if (lastAttempt !== undefined && Date.now() - lastAttempt < 1200) return true;
+    surveySkipAttempts.set(candidate, Date.now());
+    log('Skipping course survey:', text || aria);
+    showHUD('⏭️ Skipping survey...', 'info');
+    // A native click invokes LinkedIn's skip handler without submitting a rating.
+    candidate.click();
+    return true;
   }
-
-  // Fallback: try clicking an X/close button on the overlay
-  const closeButtons = document.querySelectorAll(
-    '[aria-label*="close" i], [aria-label*="dismiss" i], [aria-label*="tutup" i], [data-test-modal-close], .modal-close, .artdeco-modal__dismiss'
-  );
-  for (const btn of closeButtons) {
-    if (isLanguageElement(btn)) continue;
-    // Only click if it's inside a survey/feedback context
-    const parent = btn.closest('[class*="survey"], [class*="feedback"], [class*="modal"], [class*="overlay"], [role="dialog"]');
-    if (parent && isElementClickable(btn)) {
-      log('Survey overlay detected! Clicking close button.');
-      showHUD('⏭️ Closing survey overlay...', 'info');
-      clickElement(btn);
-      return true;
-    }
-  }
-
   return false;
 }
 
@@ -2568,10 +2536,8 @@ function startWatchdog() {
   if (watchdogInterval) clearInterval(watchdogInterval);
 
   watchdogInterval = setInterval(() => {
-    // Always try to dismiss surveys when bulk mode is active
-    if (isBulkActive) {
-      dismissSurveyIfPresent();
-    }
+    // Handle player surveys during ordinary autoplay as well as AutoPilot.
+    if (dismissSurveyIfPresent()) return;
 
     if (isBulkActive) {
       if (isRunningAutonomousStep || isNavigatingToLesson || isSolvingQuiz) {
@@ -2708,6 +2674,7 @@ function attachToVideo(video) {
 
 function startObserver() {
   const tryFind = () => {
+    if (dismissSurveyIfPresent()) return;
     if (!isBulkActive) checkAndAutoSolveQuiz();
     if (videoEl && !videoEl.isConnected) {
       if (_listenerController) _listenerController.abort();

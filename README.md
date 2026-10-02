@@ -1,6 +1,6 @@
 # LinkedIn Learning AI AutoPilot
 
-A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.3**.
+A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.4**.
 
 ## Installation
 
@@ -14,7 +14,7 @@ A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson 
 - **Speed injection:** apply a saved playback speed, bounded to 0.25–16×. Disabling it resets the rate to 1× and returns control to the native player. Actual support and audible sound at extreme speeds depend on the browser.
 - **Background play:** enable visibility and focus handling for background playback. If a playing video is paused during a tab switch, a bounded recovery attempts to resume it even outside AutoPilot. Enabling the toggle does not start a paused video, and trusted keyboard/mouse interactions cancel recovery. Disabling it restores native visibility reporting. If Chrome blocks playback, the extension asks you to return to the tab and press Play once. Browser suspension, autoplay restrictions, and OS power saving can still pause a tab.
 - **Auto-navigation:** allow automatic movement between lessons. Turning it off prevents automatic lesson navigation; manual next-lesson controls remain available.
-- **AutoPilot:** start the bulk course workflow in the selected focus mode. Stop cancels pending lesson navigation and clears the saved bulk state. Changing speed alone preserves pause, mute, and pitch preferences.
+- **AutoPilot:** start the bulk course workflow in the selected focus mode. Stop cancels pending lesson navigation and clears the saved bulk state. Changing speed alone preserves pause, mute, and pitch preferences. Player surveys are skipped during AutoPilot and ordinary autoplay when auto-navigation and non-video skipping are enabled. Stop pauses automatic survey skipping until automation is restarted. The extension clicks Skip survey without choosing a rating; generic Close/Skip controls are used only inside a matching survey context.
 - **AI providers:** optionally configure Gemini, Groq, OpenRouter, or NVIDIA credentials in the popup. Identical in-flight prompts share a request; different prompts receive independent responses.
 
 Saved settings load before player observation and update across open tabs. The extension preserves real playback rates, including speeds below 1×, and attaches to replacement videos during page navigation.
