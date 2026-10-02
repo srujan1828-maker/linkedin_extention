@@ -63,11 +63,12 @@ test('background play follows the toggle and rejects messages from other windows
   assert.equal(e.document.visibilityState, 'hidden');
 });
 
-async function content(saved) {
+async function content(saved, initialUrl = 'https://www.linkedin.com/learning/example/lesson') {
   const messages = [], runtime = [], storage = [], timers = [], intervals = [], mutations = [];
   let attached = 0;
   const document = { body: { innerText: '', querySelector: () => null, querySelectorAll: () => [] }, hidden: false, querySelector: () => null, querySelectorAll: () => [], addEventListener: noop };
-  const window = { location: { href: 'https://www.linkedin.com/learning/example/lesson', pathname: '/learning/example/lesson', origin: 'https://www.linkedin.com' }, addEventListener: noop, postMessage: m => messages.push(m) };
+  const parsedUrl = new URL(initialUrl);
+  const window = { location: { href: initialUrl, pathname: parsedUrl.pathname, origin: parsedUrl.origin }, addEventListener: noop, postMessage: m => messages.push(m) };
   const chrome = {
     runtime: { id: 'test', connect: () => ({ onDisconnect: { addListener: noop }, postMessage: noop }), onMessage: { addListener: fn => runtime.push(fn) }, sendMessage: noop },
     storage: { local: { get: async () => saved, set: async data => Object.assign(saved, data) }, onChanged: { addListener: fn => storage.push(fn) } }
@@ -257,7 +258,7 @@ test('quiz verification requires the current quiz and rejects generic results he
 });
 
 test('library discovery expands pagination and queues only unique path headings', async () => {
-  const c = await content({});
+  const c = await content({}, 'https://www.linkedin.com/learning/me/my-library/in-progress');
   c.ctx.setTimeout = fn => setImmediate(fn);
   vm.runInContext('isElementClickable = () => true', c.ctx);
   let expanded = false;
@@ -276,6 +277,7 @@ test('library discovery expands pagination and queues only unique path headings'
   assert.equal(c.saved.pathQueueActive, true);
   assert.equal(c.saved.bulkActive, true);
   assert.equal(c.saved.focusMode, 'pending_only');
+  await new Promise(resolve => setImmediate(resolve));
   assert.equal(c.window.location.href, 'https://www.linkedin.com/learning/paths/one?u=123');
 });
 
@@ -639,4 +641,203 @@ test('survey handling never selects a numeric rating', async () => {
   const rating = surveyFixture(c, {text:'5',context:{innerText:'How confident are you that you learned valuable skills from this course?'}});
   assert.equal(vm.runInContext('dismissSurveyIfPresent()', c.ctx), false);
   assert.equal(rating.clicks(), 0);
+});
+
+
+test('verified chapter quiz advances despite a stale sidebar completion marker', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  const quizPath = c.window.location.pathname;
+  const next = {href:'/learning/example/next', fullHref:'https://www.linkedin.com/learning/example/next?u=123&contextUrn=path', title:'Next lesson', completed:false, isVideo:true};
+  c.ctx.fixtureSyllabus = () => [{href:quizPath, title:'Chapter Quiz', completed:false, isQuiz:true}, next];
+  vm.runInContext('getCourseSyllabus = fixtureSyllabus', c.ctx);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  c.chrome.runtime.sendMessage = (message, callback) => {
+    if (message.action === 'ASK_AI') callback({success:true, text:'{"answerIndices":[1],"answerTexts":["Second answer"]}'});
+  };
+  assert.equal(await vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx), true);
+  assert.equal(c.window.location.href, next.fullHref);
+});
+
+test('ordinary autoplay continues a completed quiz once without bulk mode', async () => {
+  const c = await content({});
+  const quizPath = c.window.location.pathname;
+  const next = {href:'/learning/example/next', fullHref:'https://www.linkedin.com/learning/example/next', title:'Next', completed:false, isVideo:true};
+  c.ctx.fixtureSyllabus = () => [{href:quizPath, completed:false, isQuiz:true}, next];
+  vm.runInContext('getCourseSyllabus = fixtureSyllabus; expandAllSections = () => {}', c.ctx);
+  assert.equal(await vm.runInContext('continueAfterQuiz()', c.ctx), true);
+  assert.equal(c.window.location.href, next.fullHref);
+  assert.equal(await vm.runInContext('continueAfterQuiz()', c.ctx), false);
+});
+
+test('the last completed quiz returns to the learning path during autoplay', async () => {
+  const url = 'https://www.linkedin.com/learning/paths/original';
+  const c = await content({lastLearningPathUrl:url});
+  vm.runInContext('getCourseSyllabus = () => [{href:window.location.pathname, completed:false, isQuiz:true}]; expandAllSections = () => {}', c.ctx);
+  assert.equal(await vm.runInContext('continueAfterQuiz()', c.ctx), true);
+  assert.equal(c.window.location.href, url);
+});
+
+test('Stop cancels quiz continuation while settings are being fetched', async () => {
+  const c = await content({});
+  let resolveSettings;
+  c.chrome.storage.local.get = () => new Promise(resolve => {resolveSettings = resolve;});
+  const pending = vm.runInContext('continueAfterQuiz()', c.ctx);
+  vm.runInContext('quizRunEpoch++; quizAutoPaused = true; isBulkActive = false;', c.ctx);
+  resolveSettings({});
+  assert.equal(await pending, false);
+  assert.equal(c.window.location.href, 'https://www.linkedin.com/learning/example/lesson');
+});
+
+test('All Paths opens My Content and preserves the organization query', async () => {
+  const c = await content({});
+  c.window.location.href += '?u=123';
+  const result = await vm.runInContext('startAllPaths()', c.ctx);
+  assert.equal(result.discovering, true);
+  assert.equal(c.saved.pathQueueDiscoveryActive, true);
+  assert.equal(c.saved.bulkActive, false);
+  c.timers.at(-1)();
+  assert.equal(c.window.location.href, 'https://www.linkedin.com/learning/me/my-library/in-progress?u=123');
+});
+
+test('All Paths persists discovery across library sections and deduplicates paths', async () => {
+  const root = 'https://www.linkedin.com/learning/me/my-library/';
+  const c = await content({}, root + 'in-progress');
+  const link = name => ({textContent:name, getAttribute:() => '/learning/paths/' + name});
+  const one = link('one'), two = link('two');
+  const tabs = ['in-progress','saved'].map(name => ({getAttribute:() => root + name}));
+  let savedSection = false;
+  c.document.querySelectorAll = selector => {
+    if (selector === 'a[href*="/learning/me/my-library/"]') return tabs;
+    if (selector === 'main h3 a' || selector === 'main h3 a[href*="/learning/paths/"]') return savedSection ? [one,two] : [one];
+    return [];
+  };
+  const first = await vm.runInContext('startAllPaths()', c.ctx);
+  assert.equal(first.discovering, true);
+  assert.equal(c.saved.pathQueueDiscovery.paths.length, 1);
+  assert.equal(c.saved.pathQueueActive, false);
+  c.timers.at(-1)();
+  assert.equal(c.window.location.href, root + 'saved');
+  c.window.location.pathname = '/learning/me/my-library/saved';
+  savedSection = true;
+  const second = await vm.runInContext('startAllPaths({resumeDiscovery:true})', c.ctx);
+  assert.equal(second.totalPaths, 2);
+  assert.equal(c.saved.pathQueueActive, true);
+  assert.equal(c.saved.pathQueueDiscoveryActive, false);
+  c.timers.at(-1)();
+  assert.equal(c.window.location.href, 'https://www.linkedin.com/learning/paths/one');
+});
+
+test('discovery pauses the watchdog and Stop cancels pagination', async () => {
+  const c = await content({}, 'https://www.linkedin.com/learning/me/my-library/in-progress');
+  const one = {textContent:'One', getAttribute:() => '/learning/paths/one'};
+  const more = {getAttribute:() => 'Show more in progress content', click:noop};
+  c.document.querySelectorAll = selector => selector === 'main button' ? [more] : selector === 'main h3 a' ? [one] : [];
+  c.ctx.escapeCount = 0;
+  vm.runInContext('isElementClickable = () => true; runAutonomousStep = () => {escapeCount++;}', c.ctx);
+  const pending = vm.runInContext('startAllPaths()', c.ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(vm.runInContext('isDiscoveringPathQueue', c.ctx), true);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), false);
+  c.intervals.at(-1)();
+  assert.equal(c.ctx.escapeCount, 0);
+  c.runtime[0]({action:'stopBulkComplete'}, {}, noop);
+  c.timers.at(-1)();
+  assert.equal((await pending).success, false);
+  assert.equal(c.saved.pathQueueDiscoveryActive, false);
+  assert.equal(c.saved.pathQueueActive, false);
+});
+
+test('initialization resumes library discovery without restoring the course runner', async () => {
+  const library = 'https://www.linkedin.com/learning/me/my-library/in-progress';
+  const c = await content({bulkActive:true, pathQueueDiscoveryActive:true, pathQueueDiscovery:{sections:[library],visited:[],paths:[]}}, library);
+  assert.equal(vm.runInContext('isDiscoveringPathQueue', c.ctx), true);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), false);
+  const one = {textContent:'One', getAttribute:() => '/learning/paths/one'};
+  c.document.querySelectorAll = selector => selector === 'main h3 a' || selector === 'main h3 a[href*="/learning/paths/"]' ? [one] : [];
+  await c.timers[0]();
+  assert.equal(c.saved.pathQueueActive, true);
+  assert.equal(c.saved.pathQueueDiscoveryActive, false);
+  c.timers.at(-1)();
+  assert.equal(c.window.location.href, 'https://www.linkedin.com/learning/paths/one');
+});
+
+
+function practiceResultFixture(c, completed = true) {
+  const next = {href:'/learning/example/next', fullHref:'https://www.linkedin.com/learning/example/next', title:'Objects as sets', completed:false, isVideo:true};
+  c.window.location.pathname = '/learning/example/quiz/current';
+  c.window.location.href = 'https://www.linkedin.com' + c.window.location.pathname;
+  let continueClicks = 0;
+  const button = text => ({innerText:text, disabled:false, getClientRects:()=>[1], closest:()=>null, getAttribute:()=>null, click:()=>{continueClicks++;}});
+  const main = {innerText:'You answered 2 of 4 questions correctly. Keep practicing! Review your answers and try again.',
+    querySelector:()=>null, querySelectorAll:()=>[button('Review all answers'),button('Continue')], getClientRects:()=>[1]};
+  c.document.querySelector = selector => selector === 'main, .classroom-layout__main, .classroom-body, [role="main"]' ? main : null;
+  c.document.body = main;
+  // Result pages can retain enabled question controls in review markup.
+  c.document.querySelectorAll = selector => selector === '.chapter-quiz-question' ?
+    [{getClientRects:()=>[1], querySelector:()=>({innerText:'Reviewed question'}), querySelectorAll:()=>[{disabled:false}]}] : [];
+  c.ctx.fixtureSyllabus = () => [{href:c.window.location.pathname, title:'Chapter Quiz', completed, isQuiz:true}, next];
+  vm.runInContext('getCourseSyllabus = fixtureSyllabus; expandAllSections = () => {}; showHUD = () => {}; sendProgress = () => {}; isElementClickable = () => true', c.ctx);
+  return {main, next, clicks:()=>continueClicks};
+}
+
+test('Keep practicing result is recognized outside legacy quiz containers', async () => {
+  const c = await content({});
+  practiceResultFixture(c);
+  assert.equal(vm.runInContext('getQuizResultState().visible', c.ctx), true);
+  assert.equal(vm.runInContext('getQuizResultState().passed', c.ctx), false);
+  assert.equal(vm.runInContext('hasActiveQuizQuestion()', c.ctx), false);
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(10)', c.ctx), true);
+});
+
+test('completed practice result resumes AutoPilot without review or AI requests', async () => {
+  const c = await content({});
+  const f = practiceResultFixture(c);
+  let requests = 0;
+  c.chrome.runtime.sendMessage = message => {if (message.action === 'ASK_AI') requests++;};
+  vm.runInContext('isBulkActive = true', c.ctx);
+  assert.equal(await vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx), true);
+  assert.equal(c.window.location.href, f.next.fullHref);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), true);
+  assert.equal(vm.runInContext('quizError', c.ctx), null);
+  assert.equal(requests, 0);
+  assert.equal(f.clicks(), 0);
+});
+
+test('solver stops parsing reviewed questions once the current quiz is complete', async () => {
+  const c = await content({});
+  practiceResultFixture(c);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  vm.runInContext('parseCurrentQuizQuestion = () => {throw Error("Result must not be parsed as a question");}', c.ctx);
+  assert.equal(await vm.runInContext('solveLinkedInQuiz()', c.ctx), true);
+  assert.equal(vm.runInContext('quizError', c.ctx), null);
+});
+
+test('a partial score without a completion mark is not verified as completed', async () => {
+  const c = await content({});
+  practiceResultFixture(c, false);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(10)', c.ctx), false);
+});
+
+test('Stop cancels result continuation during the verification storage wait', async () => {
+  const c = await content({});
+  const f = practiceResultFixture(c);
+  let resolveSettings;
+  c.chrome.storage.local.get = () => new Promise(resolve => {resolveSettings = resolve;});
+  const pending = vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx);
+  await new Promise(resolve => setImmediate(resolve));
+  c.runtime[0]({action:'stopBulkComplete'}, {}, noop);
+  resolveSettings({});
+  assert.equal(await pending, true);
+  assert.notEqual(c.window.location.href, f.next.fullHref);
+  assert.equal(vm.runInContext('isBulkActive', c.ctx), false);
+});
+
+test('ordinary quiz questions still override old sidebar completion marks', async () => {
+  const c = await content({});
+  chapterQuizFixture(c);
+  vm.runInContext('getCourseSyllabus = () => [{href:window.location.pathname, completed:true}]', c.ctx);
+  assert.equal(vm.runInContext('getQuizResultState().visible', c.ctx), false);
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(10)', c.ctx), false);
 });
