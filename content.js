@@ -20,6 +20,8 @@
 let currentSpeed = 16;
 let autoplayEnabled = true;
 let backgroundRun = true;
+let speedInjectionEnabled = true;
+let autoNavigateEnabled = true;
 let skipNonVideos = true;
 let autoSolveQuizzes = true;
 let focusMode = 'pending_only';
@@ -31,7 +33,6 @@ let watchdogInterval = null;
 let lastRecordedTime = -1;
 let stuckCount = 0;
 let lastRateChangeTime = 0;
-let previousMuteState = false;
 let keepalivePort = null;
 let keepaliveAudioCtx = null;
 let nonVideoTimer = null;
@@ -1050,7 +1051,7 @@ function clickElement(el) {
     el.focus();
   } catch (e) {}
 
-  const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'];
+  const events = ['pointerdown', 'mousedown', 'pointerup', 'mouseup'];
   for (const ev of events) {
     try {
       el.dispatchEvent(new MouseEvent(ev, { bubbles: true, cancelable: true, view: window }));
@@ -2402,7 +2403,7 @@ let isNavigatingToLesson = false;
 let lastStepRunTime = 0;
 
 async function runAutonomousStep() {
-  if (!isBulkActive) return;
+  if (!isBulkActive || (!backgroundRun && document.hidden)) return;
   if (isRunningAutonomousStep || isNavigatingToLesson) {
     return;
   }
@@ -2713,9 +2714,11 @@ async function runAutonomousStep() {
 }
 
 async function handleVideoEnded(currentPath, currentLessonIndex, mode = 'pending_only') {
+  if (!isBulkActive || !autoNavigateEnabled) return;
   log('Video ended. Waiting for LinkedIn to award green checkmark...');
   for (let i = 0; i < 5; i++) {
     await new Promise((r) => setTimeout(r, 500));
+    if (!isBulkActive || !autoNavigateEnabled) return;
     expandAllSections();
     const syllabus = getCourseSyllabus();
     const curr = syllabus.find((l) => {
@@ -2734,6 +2737,7 @@ async function handleVideoEnded(currentPath, currentLessonIndex, mode = 'pending
 }
 
 async function advanceToNextItem(syllabus, currentIdx = -1, mode = 'pending_only') {
+  if (!isBulkActive || !autoNavigateEnabled) return;
   if (!syllabus || syllabus.length === 0) return;
   const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
 
@@ -2811,7 +2815,7 @@ async function advanceToNextUncompletedVideo(syllabus, currentIdx = -1) {
 }
 
 function navigateToLesson(lesson) {
-  if (!lesson) return;
+  if (!isBulkActive || !autoNavigateEnabled || !lesson) return;
   const targetUrl = lesson.fullHref || lesson.href;
   if (!targetUrl) return;
 
@@ -2849,31 +2853,14 @@ function navigateToLesson(lesson) {
 
 // ─── Playback Engine & Anti-Freeze ────────────────────────────────────────────
 
-function configureVideoForSpeed(video, speed) {
-  if (!video) return;
-
-  try {
-    video.preservesPitch = false;
-    video.webkitPreservesPitch = false;
-    video.mozPreservesPitch = false;
-  } catch (e) {}
-
-  if (speed > 2) {
-    if (!video.muted) {
-      previousMuteState = false;
-      video.muted = true;
-    }
-  } else {
-    if (previousMuteState === false && video.muted) {
-      video.muted = false;
-    }
-  }
+function syncPlaybackSettings() {
+  window.postMessage({ type: 'LI_FORCE_SPEED', speed: currentSpeed, enabled: speedInjectionEnabled }, window.location.origin);
+  window.postMessage({ type: 'LI_SET_BACKGROUND_PLAY', enabled: backgroundRun }, window.location.origin);
 }
 
 function applySpeed(video, speed) {
   if (!video) return;
 
-  configureVideoForSpeed(video, speed);
   lastRateChangeTime = Date.now();
 
   // Forward to MAIN world Native Speed Engine in page-inject.js
@@ -2881,17 +2868,13 @@ function applySpeed(video, speed) {
     window.postMessage({
       type: 'LI_FORCE_SPEED',
       speed: speed,
-      enabled: true
-    }, '*');
+      enabled: speedInjectionEnabled
+    }, window.location.origin);
   } catch (e) {}
 
   try {
-    video.playbackRate = speed;
+    video.playbackRate = speedInjectionEnabled ? speed : 1;
   } catch (err) {}
-
-  if (video.paused && !video.ended) {
-    video.play().catch(() => {});
-  }
 
   if (!isBulkActive) {
     try {
@@ -3013,11 +2996,11 @@ function startWatchdog() {
       if (found) {
         attachToVideo(found);
       } else {
-        if (skipNonVideos && autoplayEnabled) {
+        if (skipNonVideos && autoplayEnabled && autoNavigateEnabled) {
           if (!nonVideoTimer) {
             nonVideoTimer = setTimeout(() => {
               nonVideoTimer = null;
-              if (!document.querySelector('video')) {
+              if (skipNonVideos && autoplayEnabled && autoNavigateEnabled && !document.querySelector('video')) {
                 goToNextLesson();
               }
             }, 4000);
@@ -3035,13 +3018,12 @@ function startWatchdog() {
     if (videoEl.ended) return;
 
     const activeTargetRate = isBulkActive ? (currentSpeed || 16) : currentSpeed;
-    if (Date.now() - lastRateChangeTime > 500) {
+    if (speedInjectionEnabled && Date.now() - lastRateChangeTime > 500) {
       if (videoEl.playbackRate !== activeTargetRate) {
         applySpeed(videoEl, activeTargetRate);
       }
     }
 
-    configureVideoForSpeed(videoEl, activeTargetRate);
 
     const now = videoEl.currentTime;
     if (now === lastRecordedTime && !videoEl.paused) {
@@ -3058,7 +3040,7 @@ function startWatchdog() {
       lastRecordedTime = now;
     }
 
-    if (videoEl.paused && !videoEl.ended && (autoplayEnabled || isBulkActive)) {
+    if (videoEl.paused && !videoEl.ended && isBulkActive && (backgroundRun || !document.hidden)) {
       if (videoEl.readyState >= 2) {
         videoEl.play().catch(() => {});
       }
@@ -3088,9 +3070,9 @@ function attachToVideo(video) {
   startAudioKeepalive();
 
   video.addEventListener('ratechange', () => {
-    if (Date.now() - lastRateChangeTime < 300) return;
+    if (!speedInjectionEnabled || Date.now() - lastRateChangeTime < 300) return;
     const rate = isBulkActive ? (currentSpeed || 16) : currentSpeed;
-    if (video.playbackRate !== rate) {
+    if (speedInjectionEnabled && video.playbackRate !== rate) {
       applySpeed(video, rate);
     }
   }, { signal });
@@ -3100,12 +3082,14 @@ function attachToVideo(video) {
       runAutonomousStep();
       return;
     }
-    if (!autoplayEnabled) return;
-    setTimeout(goToNextLesson, 800);
+    if (!autoplayEnabled || !autoNavigateEnabled) return;
+    setTimeout(() => {
+      if (autoplayEnabled && autoNavigateEnabled && videoEl === video && video.ended && !isBulkActive) goToNextLesson();
+    }, 800);
   }, { signal });
 
   video.addEventListener('canplay', () => {
-    if (video.paused && !video.ended && (autoplayEnabled || isBulkActive)) {
+    if (video.paused && !video.ended && isBulkActive && (backgroundRun || !document.hidden)) {
       video.play().catch(() => {});
     }
   }, { signal });
@@ -3117,6 +3101,10 @@ function attachToVideo(video) {
 
 function startObserver() {
   const tryFind = () => {
+    if (videoEl && !videoEl.isConnected) {
+      if (_listenerController) _listenerController.abort();
+      videoEl = null;
+    }
     if (isLearningPathPage()) return;
     const v = document.querySelector('video');
     if (v && v !== videoEl) attachToVideo(v);
@@ -3153,22 +3141,12 @@ setInterval(() => {
 // ─── Initialization & Persistence ─────────────────────────────────────────────
 
 async function init() {
-  if (document.body) {
-    startObserver();
-    startWatchdog();
-    setTimeout(checkAndAutoSolveQuiz, 1200);
-  } else {
-    document.addEventListener('DOMContentLoaded', () => {
-      startObserver();
-      startWatchdog();
-      setTimeout(checkAndAutoSolveQuiz, 1200);
-    });
-  }
-
-  window.addEventListener('click', startAudioKeepalive, { once: true });
-
   const stored = await chrome.storage.local.get([
     'bulkActive',
+    'speedInjection',
+    'bgPlay',
+    'backgroundRun',
+    'autoNavigate',
     'speed',
     'playbackSpeed',
     'autoplay',
@@ -3182,14 +3160,18 @@ async function init() {
   ]);
 
   if (stored) {
+    speedInjectionEnabled = stored.speedInjection !== false;
+    backgroundRun = stored.bgPlay !== undefined ? !!stored.bgPlay : stored.backgroundRun !== false;
+    autoNavigateEnabled = stored.autoNavigate !== false;
     if (typeof stored.playbackSpeed === 'number') currentSpeed = stored.playbackSpeed;
     else if (typeof stored.speed === 'number') currentSpeed = stored.speed;
+    currentSpeed = Math.min(16, Math.max(0.25, Number(currentSpeed) || 1));
     if (stored.focusMode) focusMode = stored.focusMode;
     if (stored.strictCompletion !== undefined) strictCompletionEnabled = !!stored.strictCompletion;
     if (typeof stored.autoplay === 'boolean') autoplayEnabled = stored.autoplay;
     if (typeof stored.skipNonVideos === 'boolean') skipNonVideos = stored.skipNonVideos;
-    if (typeof stored.autoSolveQuizzes === 'boolean') autoSolveQuizzes = stored.autoSolveQuizzes;
-    else if (typeof stored.autoSolve === 'boolean') autoSolveQuizzes = stored.autoSolve;
+    if (typeof stored.autoSolve === 'boolean') autoSolveQuizzes = stored.autoSolve;
+    else if (typeof stored.autoSolveQuizzes === 'boolean') autoSolveQuizzes = stored.autoSolveQuizzes;
 
     try {
       window.postMessage({
@@ -3221,11 +3203,25 @@ async function init() {
       if (isGlobalNavPage()) {
         log('Init: On off-track global nav page with bulkActive=true. Escaping immediately...');
         setTimeout(() => { returnToLearningPath(); }, 400);
-        return;
       }
       setTimeout(runAutonomousStep, 1000);
     }
   }
+  syncPlaybackSettings();
+  if (document.body) {
+    startObserver();
+    startWatchdog();
+    setTimeout(checkAndAutoSolveQuiz, 1200);
+  } else {
+    document.addEventListener('DOMContentLoaded', () => {
+      startObserver();
+      startWatchdog();
+      setTimeout(checkAndAutoSolveQuiz, 1200);
+    });
+  }
+
+  window.addEventListener('click', startAudioKeepalive, { once: true });
+
 }
 
 init();
@@ -3235,7 +3231,7 @@ init();
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'startBulkComplete') {
     if (message.focusMode) focusMode = message.focusMode;
-    if (message.speed) currentSpeed = parseFloat(message.speed) || currentSpeed;
+    if (message.speed) currentSpeed = Math.min(16, Math.max(0.25, parseFloat(message.speed) || currentSpeed));
     isBulkActive = true;
     if (window.location.href.includes('/paths/')) {
       learningPathActive = true;
@@ -3257,7 +3253,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     learningPathActive = false;
     lastLearningPathUrl = null;
     chrome.storage.local.set({ bulkActive: false, learningPathActive: false, lastLearningPathUrl: null });
-    applySpeed(videoEl, 1);
+    if (nonVideoTimer) clearTimeout(nonVideoTimer);
+    nonVideoTimer = null;
+    if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
+    navWatchdogTimer = null;
+    isNavigatingToLesson = false;
+    syncPlaybackSettings();
     chrome.runtime.sendMessage({ action: 'updateBadge', text: '' });
     addLog('⏹ AutoPilot stopped by user.', 'info');
     sendResponse({ success: true });
@@ -3279,20 +3280,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.action === 'setBgPlay') {
+    backgroundRun = !!message.enabled;
+    chrome.storage.local.set({ bgPlay: backgroundRun });
+    syncPlaybackSettings();
+    sendResponse({ success: true });
+    return true;
+  }
+
+  if (message.action === 'setAutoNavigate') {
+    autoNavigateEnabled = !!message.enabled;
+    chrome.storage.local.set({ autoNavigate: autoNavigateEnabled });
+    sendResponse({ success: true });
+    return true;
+  }
+
   if (message.action === 'setSpeedInjection') {
-    chrome.storage.local.set({ speedInjection: !!message.enabled });
-    try {
-      window.postMessage({
-        type: 'LI_FORCE_SPEED',
-        speed: message.enabled ? currentSpeed : 1.0,
-        enabled: !!message.enabled
-      }, '*');
-    } catch (e) {}
-    if (!message.enabled) {
-      applySpeed(videoEl, 1);
-    } else {
-      applySpeed(videoEl, currentSpeed);
-    }
+    speedInjectionEnabled = !!message.enabled;
+    chrome.storage.local.set({ speedInjection: speedInjectionEnabled });
+    syncPlaybackSettings();
+    if (speedInjectionEnabled) applySpeed(videoEl, currentSpeed);
     sendResponse({ success: true });
     return true;
   }
@@ -3310,7 +3317,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false, error: 'Invalid speed.' });
       return true;
     }
-    currentSpeed = speed;
+    currentSpeed = Math.min(16, Math.max(0.25, speed));
     applySpeed(videoEl, currentSpeed);
     chrome.runtime.sendMessage({ action: 'setStorage', data: { speed: currentSpeed, playbackSpeed: currentSpeed } });
     sendResponse({ success: true, speed: currentSpeed, isMuted: videoEl ? videoEl.muted : false });
@@ -3381,4 +3388,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
     return true;
   }
+});
+
+
+// Apply popup settings to every open learning tab, including tabs restored later.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (changes.speedInjection) speedInjectionEnabled = changes.speedInjection.newValue !== false;
+  if (changes.playbackSpeed) currentSpeed = Math.min(16, Math.max(0.25, Number(changes.playbackSpeed.newValue) || 1));
+  if (changes.bgPlay) backgroundRun = changes.bgPlay.newValue !== false;
+  if (changes.autoNavigate) autoNavigateEnabled = changes.autoNavigate.newValue !== false;
+  if (changes.autoplay) autoplayEnabled = changes.autoplay.newValue !== false;
+  if (changes.skipNonVideos) skipNonVideos = changes.skipNonVideos.newValue !== false;
+  if (changes.autoSolve || changes.autoSolveQuizzes) autoSolveQuizzes = (changes.autoSolve || changes.autoSolveQuizzes).newValue !== false;
+  if (changes.focusMode) focusMode = changes.focusMode.newValue || 'pending_only';
+  if (changes.strictCompletion) strictCompletionEnabled = changes.strictCompletion.newValue !== false;
+  if (changes.bulkActive && changes.bulkActive.newValue === false) isBulkActive = false;
+  if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay) syncPlaybackSettings();
 });
