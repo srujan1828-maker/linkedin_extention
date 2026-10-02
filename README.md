@@ -1,6 +1,6 @@
 # LinkedIn Learning AI AutoPilot
 
-A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.4**.
+A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.5**.
 
 ## Installation
 
@@ -21,13 +21,13 @@ Saved settings load before player observation and update across open tabs. The e
 
 ## Running learning paths
 
-Open **LinkedIn Learning → My Content → In progress** (or Recommended / Assigned) and click **Run All Paths in My Content** in the popup. It expands the list's **Show more** buttons, collects path headings, and saves a queue for the paths in that list. Switch library sections and run again to process paths in another section. Enable Auto-navigation first.
+Click **Run All Paths in My Content** from a LinkedIn Learning page. It opens My Content when needed, follows the available In progress / Saved / Assigned / Recommended section links, expands Show more, deduplicates learning paths and starts a persistent queue. Discovery is isolated from the course runner so it cannot escape My Content while collecting paths. Enable Auto-navigation first.
 
 The queue uses pending-only mode. It opens each path's unfinished items in order, preserves the path and organization URL context, and returns to the overview after each course or standalone video. Standalone items play only their linked video. A path advances only after all its item cards show LinkedIn's explicit **Completed** status. The queue persists across page loads; Stop cancels it and pending quiz actions while preserving your AI-assistance preference. Ordinary autoplay also returns to the remembered path after the last lesson. Return navigation uses the saved queue, a valid back-link URL even in a hidden sidebar, saved path state, or a same-site path referrer.
 
-For quizzes, enable AI assistance and configure a provider key. The solver detects chapter quizzes that mount after navigation, prioritizes active questions over Viewed markers, and prevents non-video navigation from skipping a loading quiz. One workflow runs at a time through verification and retakes. A provider-key change or re-enabling AI assistance clears a paused error; Solve Current Quiz reports failures in the Activity Log. The solver reads the active chapter question, validates exact option text / zero-based indices, clicks each native input once, verifies selection, and submits only through an enabled button. Missing keys, API failures, invalid answers, or failed selection pause the run. A generic results heading or another completed quiz cannot verify the current quiz. AI correctness remains dependent on the provider.
+For quizzes, enable AI assistance and configure a provider key. The solver detects chapter quizzes that mount after navigation, prioritizes active questions over Viewed markers, and prevents non-video navigation from skipping a loading quiz. One workflow runs at a time through verification and retakes. A provider-key change or re-enabling AI assistance clears a paused error; Solve Current Quiz reports failures in the Activity Log. After verified completion, it explicitly advances to the next unfinished course item (or returns to the path), including during ordinary autoplay. It treats the verified quiz as completed locally while waiting for the sidebar marker to update, and does not require a page refresh. The solver reads the active chapter question, validates exact option text / zero-based indices, clicks each native input once, verifies selection, and submits only through an enabled button. Missing keys, API failures, invalid answers, or failed selection pause the run. A generic results heading or another completed quiz cannot verify the current quiz. AI correctness remains dependent on the provider.
 
-Summative final exams require manual completion. After course lessons finish, the extension returns to the path first. If the path still shows that course as unfinished and it has a final exam, the run pauses there and tells you to check the exam before restarting. The queue covers paths listed in the selected library section, not every path in LinkedIn's catalog.
+Summative final exams require manual completion. After course lessons finish, the extension returns to the path first. If the path still shows that course as unfinished and it has a final exam, the run pauses there and tells you to check the exam before restarting. The queue covers paths listed in the available My Content sections, not every path in LinkedIn's catalog.
 
 ## Privacy and limitations
 
