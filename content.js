@@ -1496,6 +1496,38 @@ async function selectOptionAndVerify(option) {
   return selectOption(option, true);
 }
 
+function normalizeOptionForMatch(value) {
+  if (typeof value !== 'string') return '';
+  return value.normalize('NFC').toLowerCase()
+    .replace(/[\u2018\u2019\u02bc]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[\u00a0\u202f]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+function parseAIAnswerPayload(raw) {
+  if (typeof raw !== 'string' || raw.length > 65536) return null;
+  const text = raw.replace(/\`\`\`(?:json)?/gi, '').trim();
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch (_) {
+    const start = text.indexOf('{'), end = text.lastIndexOf('}');
+    if (start < 0 || end <= start) return null;
+    try { parsed = JSON.parse(text.slice(start, end + 1)); } catch (_) { return null; }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (parsed.answerIndices === undefined) {
+    if (Array.isArray(parsed.answer_indices)) parsed.answerIndices = parsed.answer_indices;
+    else if (parsed.answerIndex !== undefined) parsed.answerIndices = [parsed.answerIndex];
+  }
+  if (parsed.answerTexts === undefined) {
+    if (Array.isArray(parsed.answer_texts)) parsed.answerTexts = parsed.answer_texts;
+    else if (typeof parsed.answerText === 'string') parsed.answerTexts = [parsed.answerText];
+  }
+  if (Array.isArray(parsed.answerIndices)) parsed.answerIndices = parsed.answerIndices.map(index =>
+    typeof index === 'string' && /^(?:0|[1-9][0-9]*)$/.test(index) ? Number(index) : index);
+  return parsed;
+}
+
 function matchAnswerIndices(options, ans) {
   if (!options?.length || !ans || ans.error) return [];
   const texts = Array.isArray(ans.answerTexts) ? ans.answerTexts : [];
@@ -1504,7 +1536,7 @@ function matchAnswerIndices(options, ans) {
   if (indices.some(i => !Number.isInteger(i) || i < 0 || i >= options.length)) return [];
   const mapped = [];
   for (const text of texts) {
-    const matches = options.flatMap((o, i) => cleanFormulaText(o.text) === cleanFormulaText(text) ? [i] : []);
+    const matches = options.flatMap((o, i) => normalizeOptionForMatch(o.text) === normalizeOptionForMatch(text) ? [i] : []);
     if (matches.length !== 1) return [];
     mapped.push(matches[0]);
   }
@@ -1515,7 +1547,7 @@ function matchAnswerIndices(options, ans) {
 
 function resolveSingleChoiceOption(options, ans, knownWrongAnswers = []) {
   const indices = matchAnswerIndices(options, ans);
-  if (indices.length !== 1 || knownWrongAnswers.some(t => cleanFormulaText(t) === cleanFormulaText(options[indices[0]].text))) {
+  if (indices.length !== 1 || knownWrongAnswers.some(t => normalizeOptionForMatch(t) === normalizeOptionForMatch(options[indices[0]].text))) {
     return { index: -1, reason: 'No unambiguous valid single answer' };
   }
   return { index: indices[0], reason: 'Validated option mapping' };
@@ -1593,13 +1625,26 @@ function learnFromQuizReviewScreen() {
   }
 }
 
+function getAIRepairSelection(question, answer) {
+  if (!answer || answer.error) return [];
+  const indices = Array.isArray(answer.answerIndices) ? answer.answerIndices : [];
+  if (indices.some(index => !Number.isInteger(index) || index < 0 || index >= question.options.length)) return [];
+  const byIndex = matchAnswerIndices(question.options, {answerIndices:indices});
+  const byText = matchAnswerIndices(question.options, {answerTexts:answer.answerTexts});
+  if (byIndex.length && byText.length &&
+      (byIndex.length !== byText.length || byIndex.some(index => !byText.includes(index)))) return [];
+  const chosen = byIndex.length ? byIndex : byText;
+  return question.type === 'checkbox' || chosen.length === 1 ? chosen : [];
+}
+
 async function askAIForQuestion(q) {
+  const requestEpoch = quizRunEpoch, requestPath = window.location.pathname;
   const questionKey = `${getCourseSlug() || ''}:${(q.prompt || '').trim().toLowerCase()}`;
 
   // 1. Check if we already have the verified correct answer from review feedback!
   const correctAnswers = quizCorrectAnswersMap.get(questionKey);
   const knownCorrectAnswer = correctAnswers?.size === 1 ? [...correctAnswers][0] : null;
-  if (knownCorrectAnswer && q.type === 'radio' && q.options.some(o => cleanFormulaText(o.text) === cleanFormulaText(knownCorrectAnswer))) {
+  if (knownCorrectAnswer && q.type === 'radio' && q.options.some(o => normalizeOptionForMatch(o.text) === normalizeOptionForMatch(knownCorrectAnswer))) {
     log(`Using verified correct answer for "${q.prompt}": "${knownCorrectAnswer}"`);
     const matchIdx = q.options.findIndex((o) => cleanFormulaText(o.text) === cleanFormulaText(knownCorrectAnswer));
     const targetIdx = matchIdx;
@@ -1651,26 +1696,42 @@ Output ONLY a valid JSON object without Markdown formatting:
     throw new Error(response?.error || 'AI provider returned no answer. Check your API key.');
   }
 
-  let text = response.text.replace(/```json/gi, '').replace(/```/g, '').trim();
-  let parsed = null;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    const s = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    if (s !== -1 && end !== -1) {
-      try { parsed = JSON.parse(text.substring(s, end + 1)); } catch (e2) {}
+  let finalResponse = response;
+  let parsed = parseAIAnswerPayload(response.text);
+  const valid = answer => answer && !answer.error &&
+    (Array.isArray(answer.answerTexts) || Array.isArray(answer.answerIndices)) &&
+    resolveAnswerIndices(q, answer).length > 0;
+  const declined = parsed?.error ||
+    (Array.isArray(parsed?.answerTexts) && Array.isArray(parsed?.answerIndices) &&
+     parsed.answerTexts.length === 0 && parsed.answerIndices.length === 0);
+  const repairSelection = getAIRepairSelection(q, parsed);
+  if (!valid(parsed) && !declined && repairSelection.length) {
+    if (requestEpoch !== quizRunEpoch || requestPath !== window.location.pathname || quizAutoPaused)
+      throw new Error('Quiz request was cancelled before response repair. No answer was submitted.');
+    await addLog('AI answer format did not map to the options. Requesting one format repair.', 'warn');
+    const repairPrompt = 'Repair only the JSON format and verbatim option text of the previous response. ' +
+      'Keep the previously selected answer(s); do not solve again or change the selection. ' +
+      'Use 0-based numeric answerIndices and exact answerTexts from OPTIONS. ' +
+      'If the previous selection is ambiguous, conflicting, or cannot be identified, return empty arrays.\n' +
+      'Return only {"answerIndices":[],"answerTexts":[],"rationale":"format repair"}.\n' +
+      'OPTIONS:\n' + JSON.stringify(q.options.map((option,index)=>({index,text:option.text}))) +
+      '\nPREVIOUS RESPONSE:\n' + String(response.text).slice(0,16000);
+    const repaired = await sendRuntimeRequest({action:'ASK_AI',prompt:repairPrompt});
+    if (requestEpoch !== quizRunEpoch || requestPath !== window.location.pathname || quizAutoPaused)
+      throw new Error('Quiz request was cancelled during response repair. No answer was submitted.');
+    if (repaired?.success && typeof repaired.text === 'string') {
+      const repairedAnswer = parseAIAnswerPayload(repaired.text);
+      const repairedSelection = repairedAnswer && resolveAnswerIndices(q, repairedAnswer);
+      if (repairedSelection?.length === repairSelection.length &&
+          repairedSelection.every(index => repairSelection.includes(index))) {
+        parsed = repairedAnswer; finalResponse = repaired;
+      }
     }
   }
-
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
-      (!Array.isArray(parsed.answerTexts) && !Array.isArray(parsed.answerIndices)) ||
-      resolveAnswerIndices(q, parsed).length === 0) {
-    throw new Error('AI response did not match the current options. No answer was submitted.');
-  }
-  parsed.provider = response.provider || 'AI';
+  if (!valid(parsed)) throw new Error('AI response did not match the current options after validation. No answer was submitted.');
+  parsed.provider = finalResponse.provider || response.provider || 'AI';
   parsed.rawPrompt = prompt;
-  parsed.rawResponse = response.text;
+  parsed.rawResponse = finalResponse.text;
   return parsed;
 }
 
