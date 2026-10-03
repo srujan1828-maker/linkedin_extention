@@ -4,8 +4,8 @@ const vm = require('node:vm');
 const fs = require('node:fs');
 const path = require('node:path');
 const background = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8');
-const supervisor = background.slice(background.indexOf('function installBackgroundSupervisor'));
-const install = vm.runInNewContext(supervisor.replace('installBackgroundSupervisor(chrome);', '') + '\ninstallBackgroundSupervisor', {URL, Date});
+const supervisor = background.slice(background.indexOf('function sendBackgroundPulseWithTimeout'));
+const install = vm.runInNewContext(supervisor.replace('installBackgroundSupervisor(chrome);', '') + '\ninstallBackgroundSupervisor', {URL, Date, setTimeout, clearTimeout});
 
 function fixture(initial = {}) {
   const session = JSON.parse(JSON.stringify(initial)), handlers = {}, updates = [], messages = [], alarms = {};
@@ -92,14 +92,15 @@ test('background supervision honors Stop, background toggle and active playback'
   const start = contentSource.indexOf('let backgroundRegistration = null;');
   const end = contentSource.indexOf('function startWatchdog()', start);
   const state = {backgroundRun:true,quizAutoPaused:false,isBulkActive:true,isDiscoveringPathQueue:false,
-    isSolvingQuiz:false,isQuizWorkflowRunning:false,autoplayEnabled:true,videoEl:null};
+    isSolvingQuiz:false,isQuizWorkflowRunning:false,autoplayEnabled:true,autoNavigateEnabled:false,videoEl:null};
   const should = vm.runInNewContext(contentSource.slice(start,end) + '\nshouldSuperviseBackgroundRun', state);
   assert.equal(!!should(),true);
   state.quizAutoPaused = true; assert.equal(!!should(),false);
   state.quizAutoPaused = false; state.backgroundRun = false; assert.equal(!!should(),false);
   state.backgroundRun = true; state.isBulkActive = false; assert.equal(!!should(),false);
-  state.videoEl = {ended:false}; assert.equal(!!should(),true);
-  state.videoEl.ended = true; assert.equal(!!should(),false);
+  state.autoNavigateEnabled = true; state.videoEl = {ended:false}; assert.equal(!!should(),true);
+  state.videoEl.ended = true; assert.equal(!!should(),true);
+  state.autoNavigateEnabled = false; assert.equal(!!should(),false);
 });
 
 test('background AutoPilot suppresses routine HUD creation', () => {

@@ -87,7 +87,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   function escapeHtml(str) {
-    return (str || '')
+    return String(str ?? '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
@@ -353,9 +353,11 @@ ${escapeHtml(data.rawResponse || '')}
 
   async function getActiveLinkedInTab() {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !tab.url || !/linkedin\.com/i.test(tab.url)) {
-      return null;
-    }
+    if (!tab?.url) return null;
+    try {
+      const url = new URL(tab.url);
+      if (url.origin !== 'https://www.linkedin.com' || !/^\/(?:learning|learning-career-hub|career-hub)\//.test(url.pathname)) return null;
+    } catch (_) { return null; }
     return tab;
   }
 
@@ -694,7 +696,8 @@ ${escapeHtml(data.rawResponse || '')}
   if (btnStopBulk) {
     btnStopBulk.addEventListener('click', async () => {
       await sendToContent({ action: 'stopBulkComplete' });
-      await chrome.storage.local.set({ bulkActive: false });
+      await chrome.storage.local.set({bulkActive:false, pathQueueActive:false, pathQueueDiscoveryActive:false,
+        pathQueueDiscovery:null, learningPathActive:false, lastLearningPathUrl:null, pathExamNotice:null});
       hideProgressBar();
     });
   }
