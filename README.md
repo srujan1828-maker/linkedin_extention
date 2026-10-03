@@ -98,3 +98,9 @@ AI extension message callbacks have a two-minute timeout and surface Chrome mess
 Pending navigation can recover by elapsed time on a watchdog pulse, and obsolete navigation/skip timers cannot override a new route or skip a quiz/loading video. Path-queue advancement checks the run epoch across asynchronous storage operations and rejects invalid path URLs. Popup commands are limited to LinkedIn Learning origins/routes, and HUD messages render as text.
 
 GitHub Actions checks JavaScript syntax and runs the complete Node regression suite for pull requests and master updates. These checks use browser API fixtures; an authenticated live Chrome playback session is still needed to verify LinkedIn behavior.
+
+### AI option mapping (v10.8.15)
+
+Answer text matching normalizes smart quotes and nonbreaking whitespace while preserving mathematical operators and negation. JSON responses normalize numeric string indices (still zero-based) and explicit scalar/snake-case answer fields.
+
+If an identifiable selection has a mismatched text format, the extension requests at most one format-only repair. The repair must retain the original selected indices. Conflicting indices/text, out-of-range indices, ambiguous or partial text-only answers, and explicit empty/error responses are rejected. Stop or route changes cancel the repair; the solver still rechecks the live question and options before submitting.
