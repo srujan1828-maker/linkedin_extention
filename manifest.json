@@ -1,7 +1,7 @@
 {
   "name": "LinkedIn Learning AI AutoPilot",
   "description": "Multi-provider AI quiz auto-solver, autonomous course completer with focus modes, and 16x video speed engine for LinkedIn Learning.",
-  "version": "10.8.6",
+  "version": "10.8.7",
   "manifest_version": 3,
   "icons": {
     "48": "icon.png",
@@ -45,7 +45,8 @@
   "permissions": [
     "storage",
     "tabs",
-    "activeTab"
+    "activeTab",
+    "alarms"
   ],
   "host_permissions": [
     "https://*.linkedin.com/*",
@@ -64,5 +65,6 @@
         "https://www.linkedin.com/*"
       ]
     }
-  ]
+  ],
+  "minimum_chrome_version": "120"
 }
