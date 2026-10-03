@@ -2567,6 +2567,7 @@ window.addEventListener('message', event => {
 });
 
 function syncPlaybackSettings() {
+  syncAutomationPlaybackState();
   window.postMessage({ type: 'LI_FORCE_SPEED', speed: currentSpeed, enabled: speedInjectionEnabled }, window.location.origin);
   window.postMessage({ type: 'LI_SET_BACKGROUND_PLAY', enabled: backgroundRun }, window.location.origin);
 }
@@ -2676,12 +2677,20 @@ function goToNextLesson() {
 // ─── Watchdog Supervisor ──────────────────────────────────────────────────────
 
 let backgroundRegistration = null;
+let lastAutomationPlaybackState = null;
+function syncAutomationPlaybackState() {
+  const enabled = !quizAutoPaused && (isBulkActive || autoplayEnabled);
+  if (enabled === lastAutomationPlaybackState) return;
+  lastAutomationPlaybackState = enabled;
+  window.postMessage({type:'LI_SET_AUTOPLAY_STATE', enabled}, window.location.origin);
+}
 function shouldSuperviseBackgroundRun() {
   return backgroundRun && !quizAutoPaused &&
     (isBulkActive || isDiscoveringPathQueue || isSolvingQuiz || isQuizWorkflowRunning ||
-      (autoplayEnabled && videoEl && !videoEl.ended));
+      (autoplayEnabled && autoNavigateEnabled));
 }
 function syncBackgroundSupervision() {
+  syncAutomationPlaybackState();
   const enabled = !!shouldSuperviseBackgroundRun();
   if (enabled === backgroundRegistration) return;
   backgroundRegistration = enabled;
@@ -3327,7 +3336,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.focusMode) focusMode = changes.focusMode.newValue || 'pending_only';
   if (changes.strictCompletion) strictCompletionEnabled = changes.strictCompletion.newValue !== false;
   if (changes.bulkActive && changes.bulkActive.newValue === false) isBulkActive = false;
-  if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay) syncPlaybackSettings();
+  if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay || changes.autoplay) syncPlaybackSettings();
   if (changes.bgPlay || changes.bulkActive || changes.autoplay) syncBackgroundSupervision();
   const providerChanged = ['groqApiKey', 'geminiApiKey', 'openRouterApiKey', 'nvidiaApiKey', 'selectedProvider'].some(key => changes[key]);
   if (providerChanged || ((changes.autoSolve || changes.autoSolveQuizzes) && autoSolveQuizzes)) {

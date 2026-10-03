@@ -68,3 +68,7 @@ The bridge sends only item kind, status, route and timestamps. Request headers, 
 AutoPilot waits for a missing player instead of skipping its lesson. If a video makes no progress for 60 seconds, it reloads the current page while retaining the saved run state. LinkedIn's Oops screen gets up to three Try again clicks, spaced 15 seconds apart. A per-route session budget permits two reloads in ten minutes before pausing with a visible error; real playback progress clears that budget. Active quiz questions and normal path overviews are excluded from video stall reloads.
 
 Single-question quiz results and Continue watching are recognized. Continuation attempts can run again if the page did not transition, and the runner chooses the earliest unfinished syllabus item to catch gaps.
+
+### Background player handoff (v10.8.10)
+
+The page engine tracks play/playing events, resets recovery attempts after playback resumes, and can resume replacement video players on canplay while background automation is enabled. Trusted user pauses are preserved. Background supervision stays registered between lessons while autoplay and automatic navigation are enabled, rather than releasing protection when the preceding video ends. Stop disables the automation playback bridge.
