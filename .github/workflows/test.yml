@@ -2,7 +2,7 @@ name: Extension regression tests
 on:
   pull_request:
   push:
-    branches: [master, codex/keep-quizzes-in-course-order]
+    branches: [master]
 permissions:
   contents: read
 jobs:

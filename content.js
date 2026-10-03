@@ -427,10 +427,9 @@ function isLessonCompleted(container) {
       ''
     ).toLowerCase();
     if (iconType.includes('bookmark')) continue;
+    if (/unchecked|not[-_]completed|not[-_]passed/.test(iconType)) return false;
+    if (/(?:^|[-_])(?:check(?:mark)?|completed|passed)(?:$|[-_])/.test(iconType)) return true;
     if (iconType.includes('circle') || iconType.includes('bullet') || iconType.includes('radio')) return false;
-    if (iconType.includes('check') || iconType.includes('completed') || iconType.includes('passed')) {
-      return true;
-    }
   }
 
   // 5. SVG checkmarks & green color styles (excluding bookmarks)
@@ -443,8 +442,9 @@ function isLessonCompleted(container) {
       ''
     ).toLowerCase();
     if (iconName.includes('bookmark')) continue;
+    if (/unchecked|not[-_]completed|not[-_]passed/.test(iconName)) continue;
+    if (/(?:^|[-_])(?:check(?:mark)?|completed|passed)(?:$|[-_])/.test(iconName)) return true;
     if (iconName.includes('circle') || iconName.includes('bullet') || iconName.includes('radio')) continue;
-    if (iconName.includes('check') || iconName.includes('completed') || iconName.includes('passed')) return true;
 
     const useTags = svg.querySelectorAll('use');
     for (const u of useTags) {

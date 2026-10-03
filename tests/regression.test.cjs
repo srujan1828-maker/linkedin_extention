@@ -968,3 +968,16 @@ test('malformed queued paths are rejected without throwing',async()=>{
  c.chrome.storage.local.get=async()=>({pathQueueActive:true,pathQueue:[{url:'https://other.example/learning/paths/one'}]});
  vm.runInContext('isBulkActive=true',c.ctx);assert.equal(await vm.runInContext('advancePathQueue()',c.ctx),false);
 });
+
+test('check-circle icon confirms completion rather than being treated as an empty circle',async()=>{
+ const c=await content({});const row=statusRow({text:'Chapter Quiz 4 questions'});
+ const icon={getAttribute:name=>name==='type'?'check-circle':null};
+ row.querySelectorAll=selector=>selector==='li-icon, [data-test-icon], [data-icon]'?[icon]:[];
+ c.ctx.row=row;assert.equal(vm.runInContext('isLessonCompleted(row)',c.ctx),true);
+});
+test('unchecked checkbox icon is not mistaken for a completion check',async()=>{
+ const c=await content({});const row=statusRow({text:'Chapter Quiz 4 questions'});
+ const icon={getAttribute:name=>name==='type'?'checkbox-unchecked':null};
+ row.querySelectorAll=selector=>selector==='li-icon, [data-test-icon], [data-icon]'?[icon]:[];
+ c.ctx.row=row;assert.equal(vm.runInContext('isLessonCompleted(row)',c.ctx),false);
+});
