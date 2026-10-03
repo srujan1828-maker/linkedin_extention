@@ -72,3 +72,7 @@ Single-question quiz results and Continue watching are recognized. Continuation 
 ### Background player handoff (v10.8.10)
 
 The page engine tracks play/playing events, resets recovery attempts after playback resumes, and can resume replacement video players on canplay while background automation is enabled. Trusted user pauses are preserved. Background supervision stays registered between lessons while autoplay and automatic navigation are enabled, rather than releasing protection when the preceding video ends. Stop disables the automation playback bridge.
+
+### Resume after recovery reload (v10.8.11)
+
+Recovery reloads finish saving the active AutoPilot, autoplay, and background settings first. Restored runs try playback immediately when ready and on loadeddata/canplay, using serialized play attempts with a two-second cooldown. NotAllowedError retries once with muted playback; a notice explains the change and the next trusted pointer or keyboard interaction restores the original mute setting. A failed muted attempt restores the original setting and asks for a manual Play click. Stop or navigation cancels any later fallback attempt.
