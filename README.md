@@ -82,3 +82,19 @@ Recovery reloads finish saving the active AutoPilot, autoplay, and background se
 Each service-worker pulse waits at most eight seconds for a tab response so an unresponsive tab cannot block all future supervision. Existing alarm schedules are preserved across page updates; missing alarms are recreated. Content registration renews once per minute. A pulse also nudges the page-world recovery handler when a readiness event was missed.
 
 During AutoPilot, paused video playback is retried before checking autonomous workflow locks, while quiz pages remain excluded. The pulse replies before running recovery so a failing watchdog does not prevent the service worker receiving its status. This does not enable execution while Chrome or the computer is asleep.
+
+### Unfinished quiz reconciliation (v10.8.13)
+
+Video recovery is blocked on quiz and path overview pages in the content script; the page engine also rejects quiz/path routes and cancels queued play attempts after navigation. AutoPilot checks the syllabus every five seconds while a video is playing and returns to earlier unfinished items in the selected focus mode, retaining an active quiz question in place. If the page changes during quiz work, that old work is cancelled before processing the new route.
+
+Bulk playback speed is enforced by the watchdog even during workflow waits. Service-worker pulses resend playback settings to repair a missed page bridge message. Browser background throttling or suspension still limits execution; keep Chrome open and the computer awake.
+
+### Reliability audit (v10.8.14)
+
+Completion detection honors explicit false markers, strips lesson titles from status text, rejects negative statuses, and distinguishes checked-circle icons from unchecked boxes. Ambiguous assessment responses with multiple status records defer to the visible completion status.
+
+AI extension message callbacks have a two-minute timeout and surface Chrome message errors. Updating/reloading the extension stops the old content context, removes its observer and timers, and asks for a LinkedIn tab refresh rather than continuing with an invalid context. Stop events received through storage cancel background work; popup Stop also clears path discovery when a tab cannot reply. Provider selection changes clear stale provider errors.
+
+Pending navigation can recover by elapsed time on a watchdog pulse, and obsolete navigation/skip timers cannot override a new route or skip a quiz/loading video. Path-queue advancement checks the run epoch across asynchronous storage operations and rejects invalid path URLs. Popup commands are limited to LinkedIn Learning origins/routes, and HUD messages render as text.
+
+GitHub Actions checks JavaScript syntax and runs the complete Node regression suite for pull requests and master updates. These checks use browser API fixtures; an authenticated live Chrome playback session is still needed to verify LinkedIn behavior.

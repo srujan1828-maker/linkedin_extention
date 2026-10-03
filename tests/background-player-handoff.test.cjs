@@ -17,14 +17,14 @@ function fixture(initialReadyState=4) {
   const document=Object.create({get hidden(){return hidden;}});
   Object.assign(document,{hasFocus:()=>!hidden,querySelectorAll:()=>[video],querySelector:()=>video,
     addEventListener:(type,fn)=>(listeners[type] ||= []).push(fn)});
-  const window={postMessage(){},addEventListener:(type,fn)=>(windowListeners[type] ||= []).push(fn)};
+  const window={location:{pathname:'/learning/course/video'},postMessage(){},addEventListener:(type,fn)=>(windowListeners[type] ||= []).push(fn)};
   new Function('window','document','HTMLMediaElement','setTimeout','setInterval','console','Date',source)(
     window,document,Media,fn=>timers.push(fn),()=>{}, {log(){},warn(){},error(){}},{now:()=>now});
   const message=data=>(windowListeners.message || []).forEach(fn=>fn({source:window,data}));
   const emit=(type,extra={})=>(listeners[type] || []).forEach(fn=>fn({target:video,...extra}));
   message({type:'LI_SET_BACKGROUND_PLAY',enabled:true});
   message({type:'LI_SET_AUTOPLAY_STATE',enabled:true});
-  return {video,message,emit,foreground:()=>{hidden=false;},advance:()=>{now+=2000;},
+  return {video,message,emit,navigate:path=>{window.location.pathname=path;},foreground:()=>{hidden=false;},advance:()=>{now+=2000;},
     flush:async()=>{while(timers.length)await timers.shift()();}};
 }
 test('replacement player starts in background when canplay arrives',async()=>{
@@ -56,4 +56,12 @@ test('service-worker pulse retries a ready player even if canplay was missed',as
   f.video.readyState=4;
   f.message({type:'LI_BACKGROUND_PULSE'});await f.flush();
   assert.equal(f.video.calls,1);
+});
+
+test('background recovery cannot start an underlying video on a quiz route',async()=>{
+  const f=fixture();f.navigate('/learning/course/quiz/one');f.emit('canplay');await f.flush();
+  assert.equal(f.video.calls,0);
+});
+test('queued background play is cancelled when the route changes before its timer fires',async()=>{
+  const f=fixture();f.navigate('/learning/course/next');await f.flush();assert.equal(f.video.calls,0);
 });

@@ -36,13 +36,18 @@
     });
   }
 
+  function isQuizOrPathRoute() {
+    return /\/(?:quiz|assessment|exam|paths|learning-paths)(?:\/|$)/i.test(window.location?.pathname || '');
+  }
+
   function recoverBackgroundPause(media) {
     const state = backgroundCandidates.get(media);
     if (!state || state.pending || state.attempts >= 2) return;
     state.pending = true;
+    const playbackPath = window.location?.pathname;
     setTimeout(async () => {
       state.pending = false;
-      if (!backgroundPlayEnabled || !automationPlaybackEnabled || userPausedMedia.has(media) || backgroundCandidates.get(media) !== state || !actuallyInBackground() ||
+      if (isQuizOrPathRoute() || window.location?.pathname !== playbackPath || !backgroundPlayEnabled || !automationPlaybackEnabled || userPausedMedia.has(media) || backgroundCandidates.get(media) !== state || !actuallyInBackground() ||
           media.isConnected === false || media.ended || !media.paused) return;
       state.attempts++;
       try {
@@ -118,7 +123,7 @@
     if (backgroundPlayEnabled) backgroundCandidates.set(media, {attempts:0, pending:false});
   }, true));
   function prepareBackgroundMedia(media) {
-    if (!backgroundPlayEnabled || !automationPlaybackEnabled || !actuallyInBackground() ||
+    if (isQuizOrPathRoute() || !backgroundPlayEnabled || !automationPlaybackEnabled || !actuallyInBackground() ||
         media?.tagName !== 'VIDEO' || media.ended || userPausedMedia.has(media)) return;
     if (!backgroundCandidates.has(media)) backgroundCandidates.set(media, {attempts:0, pending:false});
     if (media.paused && media.readyState >= 2) recoverBackgroundPause(media);

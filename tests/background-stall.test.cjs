@@ -57,11 +57,11 @@ function watchdogFixture({locked=true,paused=true,quiz=false}={}) {
   let plays=0;
   const video={paused,ended:false};
   const globals={
-    syncBackgroundSupervision:noop,recoverBlockedPlayback:()=>false,document:{querySelector:()=>video},
+    isExtensionContextActive:()=>true,recoverPendingLessonNavigation:()=>{},syncBackgroundSupervision:noop,recoverBlockedPlayback:()=>false,document:{querySelector:()=>video},
     videoEl:video,attachToVideo:noop,isDiscoveringPathQueue:false,isBulkActive:true,
     isQuizOnPage:()=>quiz,requestManagedPlayback:()=>{plays++;},
     dismissSurveyIfPresent:()=>false,isRunningAutonomousStep:locked,isNavigatingToLesson:false,
-    isSolvingQuiz:false,isQuizWorkflowRunning:false
+    isSolvingQuiz:false,isQuizWorkflowRunning:false,speedInjectionEnabled:false
   };
   const begin=content.indexOf('function runPlaybackWatchdog()');
   const end=content.indexOf('// ─── Video Attachment',begin);
