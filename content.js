@@ -172,7 +172,7 @@ function requestManagedPlayback(video) {
   const epoch = quizRunEpoch, path = window.location.pathname;
   return managedPlayback(video, () => epoch === quizRunEpoch && path === window.location.pathname &&
     !quizAutoPaused && !isDiscoveringPathQueue && (isBulkActive || autoplayEnabled) &&
-    (backgroundRun || !document.hidden) && video.isConnected !== false);
+    (backgroundRun || !document.hidden) && !isQuizOnPage() && !isLearningPathPage() && video.isConnected !== false);
 }
 let recoveryReloadInFlight = false;
 async function reloadForPlaybackRecovery() {
@@ -2224,6 +2224,13 @@ async function runStandalonePathVideo() {
   }
 }
 
+function findEarlierUnfinishedLesson(syllabus, path, mode = 'pending_only') {
+  const index = syllabus.findIndex(item => item.href === path);
+  if (index < 0) return null;
+  return syllabus.slice(0, index).find(item => !item.completed &&
+    (mode === 'videos_only' ? item.isVideo : mode === 'quizzes_only' ? item.isQuiz : true)) || null;
+}
+
 async function runAutonomousStep() {
   if (isDiscoveringPathQueue || !isBulkActive || (!backgroundRun && document.hidden)) return;
   if (isRunningAutonomousStep || isNavigatingToLesson) {
@@ -2265,6 +2272,17 @@ async function runAutonomousStep() {
         window.history.back();
       }
       return;
+    }
+
+    // LinkedIn can auto-advance past a quiz; reconcile the route against the TOC.
+    // Keep an active question in place until its existing workflow finishes.
+    if (!hasActiveQuizQuestion() && !isSolvingQuiz && !isQuizWorkflowRunning) {
+      const earlier = findEarlierUnfinishedLesson(getCourseSyllabus(), window.location.pathname, focusMode);
+      if (earlier) {
+        addLog('Returning to unfinished item: ' + earlier.title, 'info');
+        navigateToLesson(earlier);
+        return;
+      }
     }
 
     // 0. CHECK FIRST: If page is a quiz or Career Hub assessment, check completion first then solve!
@@ -2384,7 +2402,7 @@ async function runAutonomousStep() {
     const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
     const currentLessonIndex = syllabus.findIndex((l) => {
       const h = (l.href || '').toLowerCase();
-      return h.includes(currentPath) || currentPath.includes(h);
+      return h === currentPath;
     });
     const currentLesson = currentLessonIndex !== -1 ? syllabus[currentLessonIndex] : null;
 
@@ -2631,6 +2649,7 @@ window.addEventListener('message', event => {
 });
 
 function syncPlaybackSettings() {
+  lastAutomationPlaybackState = null;
   syncAutomationPlaybackState();
   window.postMessage({ type: 'LI_FORCE_SPEED', speed: currentSpeed, enabled: speedInjectionEnabled }, window.location.origin);
   window.postMessage({ type: 'LI_SET_BACKGROUND_PLAY', enabled: backgroundRun }, window.location.origin);
@@ -2744,7 +2763,7 @@ let backgroundRegistration = null;
 let backgroundRegisteredAt = -Infinity;
 let lastAutomationPlaybackState = null;
 function syncAutomationPlaybackState() {
-  const enabled = !quizAutoPaused && (isBulkActive || autoplayEnabled);
+  const enabled = !quizAutoPaused && !isQuizOnPage() && !isLearningPathPage() && (isBulkActive || autoplayEnabled);
   if (enabled === lastAutomationPlaybackState) return;
   lastAutomationPlaybackState = enabled;
   window.postMessage({type:'LI_SET_AUTOPLAY_STATE', enabled}, window.location.origin);
@@ -2780,6 +2799,9 @@ function runPlaybackWatchdog() {
     if (videoEl && videoEl !== currentVideo) videoEl = null;
     if (currentVideo && currentVideo !== videoEl) attachToVideo(currentVideo);
     if (isDiscoveringPathQueue) return;
+    // Bulk mode also needs speed enforcement after a player or page-world reset.
+    if (isBulkActive && videoEl && !isQuizOnPage() && speedInjectionEnabled &&
+        Date.now() - lastRateChangeTime > 500 && videoEl.playbackRate !== currentSpeed) applySpeed(videoEl, currentSpeed);
     // Playback recovery must continue even while a navigation/quiz step awaits a response.
     if (isBulkActive && videoEl && !isQuizOnPage() && videoEl.paused && !videoEl.ended) requestManagedPlayback(videoEl);
     // Handle player surveys during ordinary autoplay as well as AutoPilot.
@@ -2798,7 +2820,7 @@ function runPlaybackWatchdog() {
         runAutonomousStep();
         return;
       }
-      if (isQuizOnPage() || !videoEl || videoEl.ended || videoEl.paused) {
+      if (isQuizOnPage() || !videoEl || videoEl.ended || videoEl.paused || Date.now() - lastStepRunTime >= 5000) {
         runAutonomousStep();
       }
       return;
@@ -2945,6 +2967,10 @@ function startObserver() {
 let lastMonitoredUrl = window.location.href;
 setInterval(() => {
   if (window.location.href !== lastMonitoredUrl) {
+    if (isSolvingQuiz || isQuizWorkflowRunning) {
+      quizRunEpoch++;
+      addLog('Page changed during quiz work. Cancelling the old page work and reconciling unfinished items.', 'warn');
+    }
     lastMonitoredUrl = window.location.href;
     rememberLearningPath();
     quizError = null; quizErrorUrl = null; lastQuizCheckTime = 0;
@@ -3210,6 +3236,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Reply immediately: a stalled recovery action must not block supervision.
     sendResponse({active});
     if (active) {
+      syncPlaybackSettings();
       window.postMessage({type:'LI_BACKGROUND_PULSE'}, window.location.origin);
       try { runPlaybackWatchdog(); }
       catch (error) { addLog('Background watchdog failed: ' + error.message, 'warn'); }

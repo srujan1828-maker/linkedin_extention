@@ -82,3 +82,9 @@ Recovery reloads finish saving the active AutoPilot, autoplay, and background se
 Each service-worker pulse waits at most eight seconds for a tab response so an unresponsive tab cannot block all future supervision. Existing alarm schedules are preserved across page updates; missing alarms are recreated. Content registration renews once per minute. A pulse also nudges the page-world recovery handler when a readiness event was missed.
 
 During AutoPilot, paused video playback is retried before checking autonomous workflow locks, while quiz pages remain excluded. The pulse replies before running recovery so a failing watchdog does not prevent the service worker receiving its status. This does not enable execution while Chrome or the computer is asleep.
+
+### Unfinished quiz reconciliation (v10.8.13)
+
+Video recovery is blocked on quiz and path overview pages in the content script; the page engine also rejects quiz/path routes and cancels queued play attempts after navigation. AutoPilot checks the syllabus every five seconds while a video is playing and returns to earlier unfinished items in the selected focus mode, retaining an active quiz question in place. If the page changes during quiz work, that old work is cancelled before processing the new route.
+
+Bulk playback speed is enforced by the watchdog even during workflow waits. Service-worker pulses resend playback settings to repair a missed page bridge message. Browser background throttling or suspension still limits execution; keep Chrome open and the computer awake.
