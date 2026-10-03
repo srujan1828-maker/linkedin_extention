@@ -51,6 +51,7 @@
       } else {
         // Only the submitted assessment's basic status, not an unrelated nested record.
         const rows = (response?.included || []).filter(item => /\.ConsistentBasicAssessmentStatus$/.test(item.$type || ''));
+        if (meta.action === 'reset') { emit('IN_PROGRESS'); return; }
         if (rows.length !== 1) return; // Ambiguous response: defer to the page's completion status.
         const row = rows[0];
         const detail = row?.details;

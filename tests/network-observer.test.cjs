@@ -106,3 +106,15 @@ test('failed progress is logged without retrying or marking completion', () => {
   const f=bridge();f.setClock(40000);f.event('FAILED',{startedAt:40000,observedAt:40000});
   assert.equal(f.has(),false);assert.equal(f.resumed(),0);assert.equal(f.logs.length,1);
 });
+
+test('multiple quiz status records cannot falsely complete the submitted quiz',()=>{
+ const f=fixture();
+ const meta=f.observer.classify('/learning-api/graphql?queryId=assessments.hash&variables='+encodeURIComponent('(key:'+quizUrn+')'),'GET',route,100);
+ f.observer.observe(meta,null,{included:[{$type:'example.Assessment',entityUrn:quizUrn}]},200);
+ const post=f.observer.classify('/learning-api/detailedAssessmentStatuses?action=submitResponse','POST',route,200);
+ f.observer.observe(post,{assessmentUrn:quizUrn},{included:[
+  {$type:'example.ConsistentBasicAssessmentStatus',details:{statusType:'COMPLETED',completedAt:999}},
+  {$type:'example.ConsistentBasicAssessmentStatus',details:{statusType:'IN_PROGRESS'}}
+ ]},200);
+ assert.equal(f.events.length,0);
+});

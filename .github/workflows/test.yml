@@ -19,4 +19,4 @@ jobs:
           node --check network-observer.js
           node --check popup.js
       - name: Run regression tests
-        run: node --test tests/*.test.cjs
+        run: node --test --test-reporter=./.github/test-reporter.cjs tests/*.test.cjs
