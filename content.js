@@ -93,7 +93,7 @@ function connectKeepalivePort() {
   }
 }
 
-connectKeepalivePort();
+// Background supervision uses Chrome alarms instead of an always-open ping port.
 
 function startAudioKeepalive() {
   // Non-invasive no-op: background playback is maintained by Page Visibility spoofing in page-inject.js
@@ -732,7 +732,11 @@ function dismissSurveyIfPresent() {
 
 // ─── Progress Reporting ───────────────────────────────────────────────────────
 
+let lastProgressSignature = '', lastProgressSentAt = 0;
 function sendProgress(data) {
+  const signature = JSON.stringify(data), now = Date.now();
+  if (!data.error && !data.isDone && signature === lastProgressSignature && now - lastProgressSentAt < 2000) return;
+  lastProgressSignature = signature; lastProgressSentAt = now;
   try {
     chrome.runtime.sendMessage({ action: 'bulkProgress', ...data });
   } catch (e) {}
@@ -750,6 +754,7 @@ function sendProgress(data) {
 
 let hudTimeout = null;
 function showHUD(message, type = 'info') {
+  if (backgroundRun && (isBulkActive || isDiscoveringPathQueue) && type !== 'error' && type !== 'warn') return;
   if (!document.body) return;
   let hud = document.getElementById('li-autopilot-hud');
   if (!hud) {
@@ -2584,10 +2589,31 @@ function goToNextLesson() {
 
 // ─── Watchdog Supervisor ──────────────────────────────────────────────────────
 
+let backgroundRegistration = null;
+function shouldSuperviseBackgroundRun() {
+  return backgroundRun && !quizAutoPaused &&
+    (isBulkActive || isDiscoveringPathQueue || isSolvingQuiz || isQuizWorkflowRunning ||
+      (autoplayEnabled && videoEl && !videoEl.ended));
+}
+function syncBackgroundSupervision() {
+  const enabled = !!shouldSuperviseBackgroundRun();
+  if (enabled === backgroundRegistration) return;
+  backgroundRegistration = enabled;
+  try {
+    chrome.runtime.sendMessage({action:'backgroundRunState', enabled}, response => {
+      if (chrome.runtime.lastError || response?.success === false) backgroundRegistration = null;
+    });
+  } catch (_) { backgroundRegistration = null; }
+}
+
 function startWatchdog() {
   if (watchdogInterval) clearInterval(watchdogInterval);
 
-  watchdogInterval = setInterval(() => {
+  watchdogInterval = setInterval(runPlaybackWatchdog, 500);
+}
+
+function runPlaybackWatchdog() {
+    syncBackgroundSupervision();
     if (isDiscoveringPathQueue) return;
     // Handle player surveys during ordinary autoplay as well as AutoPilot.
     if (dismissSurveyIfPresent()) return;
@@ -2671,7 +2697,6 @@ function startWatchdog() {
         videoEl.play().catch(() => {});
       }
     }
-  }, 500);
 }
 
 // ─── Video Attachment ─────────────────────────────────────────────────────────
@@ -3008,6 +3033,12 @@ async function advancePathQueue() {
 // ─── Messaging (Popup ↔ Content) ─────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'backgroundPulse') {
+    const active = !!shouldSuperviseBackgroundRun();
+    if (active) runPlaybackWatchdog();
+    sendResponse({active});
+    return true;
+  }
   if (message.action === 'startAllPaths') {
     startAllPaths().then(sendResponse).catch(err => sendResponse({ success: false, error: err.message }));
     return true;
@@ -3031,6 +3062,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     chrome.storage.local.set({ bulkActive: true, pathQueueActive: false, pathQueueDiscoveryActive: false, pathQueueDiscovery: null, focusMode, playbackSpeed: currentSpeed });
     addLog(`🚀 AutoPilot started (Focus Mode: ${focusMode}, Speed: ${currentSpeed}x)`, 'info');
+    syncBackgroundSupervision();
     runAutonomousStep();
     sendResponse({ success: true });
     return true;
@@ -3053,6 +3085,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     isNavigatingToLesson = false;
     syncPlaybackSettings();
     chrome.runtime.sendMessage({ action: 'updateBadge', text: '' });
+    syncBackgroundSupervision();
     addLog('⏹ AutoPilot stopped by user.', 'info');
     sendResponse({ success: true });
     return true;
@@ -3076,6 +3109,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'setBgPlay') {
     backgroundRun = !!message.enabled;
     chrome.storage.local.set({ bgPlay: backgroundRun });
+    syncBackgroundSupervision();
     syncPlaybackSettings();
     sendResponse({ success: true });
     return true;
@@ -3201,6 +3235,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.strictCompletion) strictCompletionEnabled = changes.strictCompletion.newValue !== false;
   if (changes.bulkActive && changes.bulkActive.newValue === false) isBulkActive = false;
   if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay) syncPlaybackSettings();
+  if (changes.bgPlay || changes.bulkActive || changes.autoplay) syncBackgroundSupervision();
   const providerChanged = ['groqApiKey', 'geminiApiKey', 'openRouterApiKey', 'nvidiaApiKey', 'selectedProvider'].some(key => changes[key]);
   if (providerChanged || ((changes.autoSolve || changes.autoSolveQuizzes) && autoSolveQuizzes)) {
     quizAutoPaused = false; quizError = null; quizErrorUrl = null; lastQuizCheckTime = 0;
