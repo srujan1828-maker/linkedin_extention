@@ -981,3 +981,55 @@ test('unchecked checkbox icon is not mistaken for a completion check',async()=>{
  row.querySelectorAll=selector=>selector==='li-icon, [data-test-icon], [data-icon]'?[icon]:[];
  c.ctx.row=row;assert.equal(vm.runInContext('isLessonCompleted(row)',c.ctx),false);
 });
+
+test('AI text matching tolerates smart quotes and nonbreaking whitespace',async()=>{
+ const c=await content({});c.ctx.q={type:'radio',options:[{text:"Use the recipient's first name."},{text:'Send generic email.'}]};
+ c.ctx.answer={answerIndices:[0],answerTexts:["Use the recipient’s\u00a0first name."]};
+ assert.deepEqual(Array.from(vm.runInContext('resolveAnswerIndices(q,answer)',c.ctx)),[0]);
+});
+test('numeric JSON string indices normalize without changing index base',async()=>{
+ const c=await content({});c.ctx.raw='{"answerIndices":["1"],"answerTexts":["Second"]}';
+ c.ctx.q={type:'radio',options:[{text:'First'},{text:'Second'}]};
+ assert.deepEqual(Array.from(vm.runInContext('resolveAnswerIndices(q,parseAIAnswerPayload(raw))',c.ctx)),[1]);
+});
+test('common scalar and snake-case JSON fields normalize to the required schema',async()=>{
+ const c=await content({});c.ctx.q={type:'radio',options:[{text:'First'},{text:'Second'}]};
+ for(const raw of ['{"answerIndex":1,"answerText":"Second"}','{"answer_indices":["1"],"answer_texts":["Second"]}']){
+ c.ctx.raw=raw;assert.deepEqual(Array.from(vm.runInContext('resolveAnswerIndices(q,parseAIAnswerPayload(raw))',c.ctx)),[1]);
+ }
+});
+test('format normalization preserves mathematical negation',async()=>{
+ const c=await content({});c.ctx.q={type:'radio',options:[{text:'\\neg A'},{text:'A'}]};c.ctx.answer={answerTexts:['A']};
+ assert.deepEqual(Array.from(vm.runInContext('resolveAnswerIndices(q,answer)',c.ctx)),[1]);
+});
+test('one-based conflicts and partial text-only answers remain blocked',async()=>{
+ const c=await content({});c.ctx.q={type:'radio',options:[{text:'First'},{text:'Second'}]};
+ for(const answer of [{answerIndices:[1],answerTexts:['First']},{answerTexts:['Fir']}]){
+ c.ctx.answer=answer;assert.equal(vm.runInContext('resolveAnswerIndices(q,answer).length',c.ctx),0);
+ assert.equal(vm.runInContext('getAIRepairSelection(q,answer).length',c.ctx),0);
+ }
+});
+test('format repair happens once and preserves an identified answer index',async()=>{
+ const c=await content({});c.ctx.q={prompt:'Which action?',type:'radio',options:[{text:'First choice'},{text:'Second choice'}]};
+ const replies=['{"answerIndices":[1],"answerTexts":["Second choice (selected)"]}','{"answerIndices":[1],"answerTexts":["Second choice"]}'];
+ let calls=0;c.chrome.runtime.sendMessage=(message,reply)=>{if(message.action==='ASK_AI')reply({success:true,text:replies[calls++],provider:'fixture'});};
+ const answer=await vm.runInContext('askAIForQuestion(q)',c.ctx);assert.equal(calls,2);assert.equal(answer.answerIndices[0],1);
+});
+test('format repair may not change the original selected index',async()=>{
+ const c=await content({});c.ctx.q={prompt:'Which action?',type:'radio',options:[{text:'First choice'},{text:'Second choice'}]};
+ const replies=['{"answerIndices":[1],"answerTexts":["Second choice (selected)"]}','{"answerIndices":[0],"answerTexts":["First choice"]}'];
+ let calls=0;c.chrome.runtime.sendMessage=(message,reply)=>{if(message.action==='ASK_AI')reply({success:true,text:replies[calls++]});};
+ await assert.rejects(vm.runInContext('askAIForQuestion(q)',c.ctx),/did not match/);assert.equal(calls,2);
+});
+test('ambiguous response is rejected without a format repair request',async()=>{
+ const c=await content({});c.ctx.q={prompt:'Which action?',type:'radio',options:[{text:'First choice'},{text:'First choice with more detail'}]};
+ let calls=0;c.chrome.runtime.sendMessage=(message,reply)=>{if(message.action==='ASK_AI'){calls++;reply({success:true,text:'{"answerTexts":["First choice with"]}'});}};
+ await assert.rejects(vm.runInContext('askAIForQuestion(q)',c.ctx),/did not match/);assert.equal(calls,1);
+});
+test('Stop during the initial response prevents format repair',async()=>{
+ const c=await content({});c.ctx.q={prompt:'Which action?',type:'radio',options:[{text:'First'},{text:'Second'}]};
+ let calls=0;c.chrome.runtime.sendMessage=(message,reply)=>{
+ if(message.action==='ASK_AI'){calls++;vm.runInContext('quizRunEpoch++;quizAutoPaused=true',c.ctx);reply({success:true,text:'{"answerIndices":[1],"answerTexts":["Second (selected)"]}'});}
+ };
+ await assert.rejects(vm.runInContext('askAIForQuestion(q)',c.ctx),/cancelled/);assert.equal(calls,1);
+});
