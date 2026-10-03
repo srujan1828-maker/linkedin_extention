@@ -62,3 +62,13 @@ Routine HUD updates are suppressed during background AutoPilot runs, repeated id
 The extension observes existing LinkedIn fetch/XHR responses for video progress and quiz status. It binds content identities from metadata responses to the exact lesson route, then accepts successful completion responses only for that identity. Completion evidence supplements delayed sidebar markers and nudges the existing runner. Errors, application errors, unknown content, expired evidence, prior lessons and responses preceding a new run cannot mark the current item complete. Reset/IN_PROGRESS responses invalidate completion evidence; Stop clears it and cancels delayed continuation.
 
 The bridge sends only item kind, status, route and timestamps. Request headers, cookies, quiz answers and HAR files are not stored or sent to the extension. No private endpoint is replayed; failed progress writes are logged rather than automatically resubmitted. LinkedIn's next-incomplete-item request returned 204 in the capture, which does not establish a navigation destination, so existing page navigation remains authoritative. DOM checks remain the fallback if private response formats change.
+
+### Playback and navigation recovery (v10.8.9)
+
+AutoPilot waits for a missing player instead of skipping its lesson. If a video makes no progress for 60 seconds, it reloads the current page while retaining the saved run state. LinkedIn's Oops screen gets up to three Try again clicks, spaced 15 seconds apart. A per-route session budget permits two reloads in ten minutes before pausing with a visible error; real playback progress clears that budget. Active quiz questions and normal path overviews are excluded from video stall reloads.
+
+Single-question quiz results and Continue watching are recognized. Continuation attempts can run again if the page did not transition, and the runner chooses the earliest unfinished syllabus item to catch gaps.
+
+### Background player handoff (v10.8.10)
+
+The page engine tracks play/playing events, resets recovery attempts after playback resumes, and can resume replacement video players on canplay while background automation is enabled. Trusted user pauses are preserved. Background supervision stays registered between lessons while autoplay and automatic navigation are enabled, rather than releasing protection when the preceding video ends. Stop disables the automation playback bridge.

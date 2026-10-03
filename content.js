@@ -35,6 +35,7 @@ let quizAutoPaused = false;
 let isQuizWorkflowRunning = false;
 let isDiscoveringPathQueue = false;
 let quizContinuationInFlight = false;
+let lastQuizContinuationPath = '', lastQuizContinuationAt = 0;
 const continuedQuizUrls = new Set();
 let videoEl = null;
 let watchdogInterval = null;
@@ -47,6 +48,74 @@ let nonVideoTimer = null;
 let navWatchdogTimer = null;
 let learningPathActive = false;
 let lastLearningPathUrl = null;
+
+// Recovery uses elapsed wall time and a per-route budget that survives reloads.
+function createPlaybackRecovery(storage) {
+  let route = '', lastTime = null, stalledSince = 0, lastRetry = -Infinity, tries = 0;
+  const key = 'li-playback-recovery-v1';
+  const read = () => { try { return JSON.parse(storage.getItem(key) || '{}'); } catch (_) { return {}; } };
+  const write = value => { try { storage.setItem(key, JSON.stringify(value)); } catch (_) {} };
+  return {
+    step({path, now, active, errorPage = false, retryAvailable = false, videoExpected = false, videoTime = null, ended = false, quiz = false}) {
+      if (!active) { route = ''; return null; }
+      if (path !== route) { route = path; lastTime = videoTime; stalledSince = now; lastRetry = -Infinity; tries = 0; }
+      if (!errorPage && (quiz || !videoExpected)) { stalledSince = now; return null; }
+      if (!errorPage && !ended && Number.isFinite(videoTime) && videoTime > (lastTime ?? 0) + 0.05) {
+        lastTime = videoTime; stalledSince = now;
+        const records = read(); if (records[path]) { delete records[path]; write(records); }
+        return null;
+      }
+      if (errorPage && retryAvailable && tries < 3 && now - lastRetry >= 15000) {
+        tries++; lastRetry = now; return 'retry';
+      }
+      if (now - stalledSince < 60000) return null;
+      const records = read();
+      const previous = records[path];
+      const record = previous && now - previous.since < 600000 ? previous : {since:now, count:0};
+      if (record.count >= 2) return 'pause';
+      record.count++; write({[path]:record});
+      stalledSince = now;
+      return 'reload';
+    }
+  };
+}
+let playbackRecovery;
+let lastRunnerErrorAt = -Infinity;
+function recoverBlockedPlayback() {
+  const active = !quizAutoPaused && (isBulkActive || autoplayEnabled) && (backgroundRun || !document.hidden);
+  const main = document.querySelector('main, [role="main"]') || document.body;
+  const text = main?.innerText || '';
+  const errorPage = /\boops[!]?/i.test(text) && /it.s (?:not you|us)|give it another try/i.test(text);
+  const retry = errorPage && Array.from(main.querySelectorAll('button, a[role="button"]')).find(el =>
+    /^try again$/i.test((el.innerText || '').trim()) && isElementClickable(el));
+  if (!playbackRecovery) {
+    let storage;
+    try { storage = window.sessionStorage; } catch (_) {}
+    playbackRecovery = createPlaybackRecovery(storage || {getItem:() => null, setItem:() => {}});
+  }
+  const quiz = !errorPage && isQuizOnPage();
+  const video = !quiz && document.querySelector('video');
+  const lesson = !quiz && getCourseSyllabus().find(item => item.href === window.location.pathname);
+  const action = playbackRecovery.step({
+    path:window.location.pathname, now:Date.now(), active,
+    errorPage, retryAvailable:!!retry, quiz,
+    videoExpected:isBulkActive && !isLearningPathPage() && !!(video || lesson?.isVideo || document.querySelector('.classroom-video-player, [data-test-video-player], .video-js')),
+    videoTime:video ? video.currentTime : null, ended:!!video?.ended
+  });
+  if (action === 'retry') { retry.click(); addLog('LinkedIn error page: clicked Try again.', 'warn'); }
+  if (action === 'reload') {
+    addLog('No video progress for one minute. Reloading this lesson; AutoPilot state is preserved.', 'warn');
+    window.location.reload();
+  }
+  if (action === 'pause') {
+    quizAutoPaused = true;
+    isBulkActive = false;
+    chrome.storage.local.set({bulkActive:false});
+    const message = 'This page still cannot load after two reloads. Check your connection or sign in, then restart AutoPilot.';
+    showHUD(message, 'error'); sendProgress({error:true,isRunning:false,message}); addLog(message, 'error');
+  }
+  return errorPage || !!action;
+}
 
 const log = (...args) => console.log('[LI-Learn]', ...args);
 
@@ -856,9 +925,9 @@ function getQuizResultState() {
     const buttons = Array.from(root.querySelectorAll('button, a[role="button"]')).filter(button =>
       !isInsideSidebar(button) && isElementClickable(button));
     const resultControls = buttons.some(button =>
-      /^(?:review (?:all )?answers|continue|continue learning|return to course|back to course|next lesson|retake(?: quiz)?)$/i.test((button.innerText || '').trim()));
-    const scored = /\byou (?:have )?answered\s+\d+\s+(?:out\s+)?of\s+\d+\s+questions\b/i.test(text);
-    const passed = passedPattern.test(text);
+      /^(?:review (?:all )?answers|continue|continue learning|return to course|back to course|next lesson|continue watching|retake(?: quiz)?)$/i.test((button.innerText || '').trim()));
+    const scored = /\byou (?:have )?answered\s+\d+\s+(?:out\s+)?of\s+\d+\s+questions?\b/i.test(text);
+    const passed = passedPattern.test(text) || /successfully completed all questions in (?:this|the) quiz/i.test(text);
     if (passed || (scored && resultControls)) return {visible:true, passed, root};
   }
   return {visible:false, passed:false, root:null};
@@ -1626,7 +1695,7 @@ async function solveLinkedInQuiz() {
         const currentPath = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
         const quizItem = syllabus.find((l) => {
           const h = (l.href || '').toLowerCase();
-          return h.includes(currentPath) || currentPath.includes(h);
+          return h === currentPath;
         });
         const activeSidebarItem = document.querySelector(
           'li.classroom-toc-item--selected, li.selected, li.active, [aria-current="page"]'
@@ -1886,7 +1955,9 @@ async function verifyQuizGreenTick(maxWaitMs = 5000, quizPath = window.location.
 async function continueAfterQuiz(quizPath = window.location.pathname, epoch = quizRunEpoch) {
   const allowed = () => epoch === quizRunEpoch && !quizAutoPaused && autoNavigateEnabled &&
     !isDiscoveringPathQueue && (isBulkActive || autoplayEnabled);
-  if (!allowed() || quizContinuationInFlight || continuedQuizUrls.has(quizPath)) return false;
+  if (!allowed() || quizContinuationInFlight) return false;
+  if (lastQuizContinuationPath === quizPath && Date.now() - lastQuizContinuationAt < 2500) return false;
+  lastQuizContinuationPath = quizPath; lastQuizContinuationAt = Date.now();
   if (window.location.pathname !== quizPath) return true;
   quizContinuationInFlight = true;
   try {
@@ -1898,7 +1969,7 @@ async function continueAfterQuiz(quizPath = window.location.pathname, epoch = qu
     const eligible = item => !item.completed && item.href !== quizPath &&
       (mode === 'videos_only' ? item.isVideo : mode === 'quizzes_only' ? item.isQuiz : true);
     const index = syllabus.findIndex(item => item.href === quizPath);
-    const next = syllabus.slice(index + 1).find(eligible) || syllabus.find(eligible);
+    const next = syllabus.find(eligible);
     if (next) {
       if (!allowed()) return false;
       if (navigateToLesson(next, {allowAutoplay:true})) {
@@ -1919,7 +1990,7 @@ async function continueAfterQuiz(quizPath = window.location.pathname, epoch = qu
     }
     const root = getQuizResultState().root;
     const button = root && Array.from(root.querySelectorAll('button, a[role="button"]')).find(el =>
-      /^(?:return to course|back to course|continue learning|next lesson|continue)$/i.test((el.innerText || '').trim()) && isElementClickable(el));
+      /^(?:return to course|back to course|continue learning|next lesson|continue watching|continue)$/i.test((el.innerText || '').trim()) && isElementClickable(el));
     if (button && allowed()) { button.click(); continuedQuizUrls.add(quizPath); return true; }
     return false;
   } finally { quizContinuationInFlight = false; }
@@ -2248,8 +2319,8 @@ async function runAutonomousStep() {
     const activeSidebarItem = document.querySelector(
       'li.classroom-toc-item--selected, li.selected, li.active, [aria-current="page"], [aria-selected="true"]'
     );
-    const activeIsCompleted = (currentLesson && currentLesson.completed) ||
-                              (activeSidebarItem && isLessonCompleted(activeSidebarItem.closest('li') || activeSidebarItem));
+    const activeIsCompleted = currentLesson ? currentLesson.completed :
+      (activeSidebarItem && isLessonCompleted(activeSidebarItem.closest('li') || activeSidebarItem));
 
     // If current item (video or quiz) has a green checkmark, skip immediately!
     if (activeIsCompleted) {
@@ -2344,19 +2415,13 @@ async function runAutonomousStep() {
       return;
     }
 
-    // 8. Video player is mounting or loading:
-    log('Waiting for video player to mount...');
-    setTimeout(() => {
-      if (!isBulkActive) return;
-      const v = document.querySelector('video');
-      if (v) {
-        runAutonomousStep();
-      } else {
-        expandAllSections();
-        const updated = getCourseSyllabus();
-        advanceToNextItem(updated, currentLessonIndex, activeFocusMode);
-      }
-    }, 1500);
+    // Wait for this lesson instead of skipping a player that has not mounted.
+    recoverBlockedPlayback();
+  } catch (error) {
+    if (Date.now() - lastRunnerErrorAt >= 30000) {
+      lastRunnerErrorAt = Date.now();
+      addLog('AutoPilot step failed: ' + error.message + '. The watchdog will try again.', 'warn');
+    }
   } finally {
     isRunningAutonomousStep = false;
   }
@@ -2402,25 +2467,8 @@ async function advanceToNextItem(syllabus, currentIdx = -1, mode = 'pending_only
     return true; // 'all' or 'pending_only'
   };
 
-  // 1. Search FORWARD from current index
-  let nextItem = null;
-  if (currentIdx !== -1) {
-    for (let i = currentIdx + 1; i < syllabus.length; i++) {
-      if (isEligible(syllabus[i])) {
-        nextItem = syllabus[i];
-        break;
-      }
-    }
-  }
-
-  // 2. Wrap around from start
-  if (!nextItem) {
-    nextItem = syllabus.find((l) => {
-      if (!isEligible(l)) return false;
-      const h = (l.href || '').toLowerCase();
-      return !h.includes(currentPath) && !currentPath.includes(h);
-    });
-  }
+  // Always resolve the earliest outstanding item, including gaps behind us.
+  const nextItem = syllabus.find(l => isEligible(l) && l.href.toLowerCase() !== currentPath);
 
   // 3. If none left, course finished
   const remaining = syllabus.filter(isEligible);
@@ -2519,6 +2567,7 @@ window.addEventListener('message', event => {
 });
 
 function syncPlaybackSettings() {
+  syncAutomationPlaybackState();
   window.postMessage({ type: 'LI_FORCE_SPEED', speed: currentSpeed, enabled: speedInjectionEnabled }, window.location.origin);
   window.postMessage({ type: 'LI_SET_BACKGROUND_PLAY', enabled: backgroundRun }, window.location.origin);
 }
@@ -2628,12 +2677,20 @@ function goToNextLesson() {
 // ─── Watchdog Supervisor ──────────────────────────────────────────────────────
 
 let backgroundRegistration = null;
+let lastAutomationPlaybackState = null;
+function syncAutomationPlaybackState() {
+  const enabled = !quizAutoPaused && (isBulkActive || autoplayEnabled);
+  if (enabled === lastAutomationPlaybackState) return;
+  lastAutomationPlaybackState = enabled;
+  window.postMessage({type:'LI_SET_AUTOPLAY_STATE', enabled}, window.location.origin);
+}
 function shouldSuperviseBackgroundRun() {
   return backgroundRun && !quizAutoPaused &&
     (isBulkActive || isDiscoveringPathQueue || isSolvingQuiz || isQuizWorkflowRunning ||
-      (autoplayEnabled && videoEl && !videoEl.ended));
+      (autoplayEnabled && autoNavigateEnabled));
 }
 function syncBackgroundSupervision() {
+  syncAutomationPlaybackState();
   const enabled = !!shouldSuperviseBackgroundRun();
   if (enabled === backgroundRegistration) return;
   backgroundRegistration = enabled;
@@ -2652,6 +2709,10 @@ function startWatchdog() {
 
 function runPlaybackWatchdog() {
     syncBackgroundSupervision();
+    if (recoverBlockedPlayback()) return;
+    const currentVideo = document.querySelector('video');
+    if (videoEl && videoEl !== currentVideo) videoEl = null;
+    if (currentVideo && currentVideo !== videoEl) attachToVideo(currentVideo);
     if (isDiscoveringPathQueue) return;
     // Handle player surveys during ordinary autoplay as well as AutoPilot.
     if (dismissSurveyIfPresent()) return;
@@ -2686,7 +2747,8 @@ function runPlaybackWatchdog() {
       if (found) {
         attachToVideo(found);
       } else {
-        if (skipNonVideos && autoplayEnabled && autoNavigateEnabled) {
+        if (skipNonVideos && autoplayEnabled && autoNavigateEnabled &&
+            !getCourseSyllabus().some(item => item.href === window.location.pathname && item.isVideo)) {
           if (!nonVideoTimer) {
             nonVideoTimer = setTimeout(() => {
               nonVideoTimer = null;
@@ -3274,7 +3336,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.focusMode) focusMode = changes.focusMode.newValue || 'pending_only';
   if (changes.strictCompletion) strictCompletionEnabled = changes.strictCompletion.newValue !== false;
   if (changes.bulkActive && changes.bulkActive.newValue === false) isBulkActive = false;
-  if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay) syncPlaybackSettings();
+  if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay || changes.autoplay) syncPlaybackSettings();
   if (changes.bgPlay || changes.bulkActive || changes.autoplay) syncBackgroundSupervision();
   const providerChanged = ['groqApiKey', 'geminiApiKey', 'openRouterApiKey', 'nvidiaApiKey', 'selectedProvider'].some(key => changes[key]);
   if (providerChanged || ((changes.autoSolve || changes.autoSolveQuizzes) && autoSolveQuizzes)) {

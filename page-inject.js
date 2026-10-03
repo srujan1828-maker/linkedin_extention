@@ -14,6 +14,9 @@
   let forcedSpeed = 1.0;
   let speedEngineEnabled = false;
   let backgroundPlayEnabled = false;
+  let automationPlaybackEnabled = true;
+  const userPausedMedia = new WeakSet();
+  let lastTrustedInteraction = -Infinity;
 
   let nativeHiddenGetter = null;
   const nativeHasFocus = typeof document.hasFocus === 'function' ? document.hasFocus.bind(document) : null;
@@ -39,7 +42,7 @@
     state.pending = true;
     setTimeout(async () => {
       state.pending = false;
-      if (!backgroundPlayEnabled || backgroundCandidates.get(media) !== state || !actuallyInBackground() ||
+      if (!backgroundPlayEnabled || !automationPlaybackEnabled || userPausedMedia.has(media) || backgroundCandidates.get(media) !== state || !actuallyInBackground() ||
           media.isConnected === false || media.ended || !media.paused) return;
       state.attempts++;
       try {
@@ -93,14 +96,34 @@
     if (!actuallyInBackground()) backgroundCandidates.clear();
   }, true);
   document.addEventListener('pause', e => {
+    if (Date.now() - lastTrustedInteraction < 1000) {
+      userPausedMedia.add(e.target);
+      backgroundCandidates.delete(e.target);
+      return;
+    }
     if (backgroundPlayEnabled && actuallyInBackground()) recoverBackgroundPause(e.target);
   }, true);
   // A real interaction can intentionally pause playback. Never undo that input.
   for (const evt of ['pointerdown', 'mousedown', 'keydown']) {
     document.addEventListener(evt, e => {
-      if (e.isTrusted) backgroundCandidates.clear();
+      if (e.isTrusted) { lastTrustedInteraction = Date.now(); backgroundCandidates.clear(); }
     }, true);
   }
+
+  // Track replacement players and reset retry counts once real playback resumes.
+  ['play', 'playing'].forEach(type => document.addEventListener(type, event => {
+    const media = event.target;
+    if (media?.tagName !== 'VIDEO') return;
+    userPausedMedia.delete(media);
+    if (backgroundPlayEnabled) backgroundCandidates.set(media, {attempts:0, pending:false});
+  }, true));
+  function prepareBackgroundMedia(media) {
+    if (!backgroundPlayEnabled || !automationPlaybackEnabled || !actuallyInBackground() ||
+        media?.tagName !== 'VIDEO' || media.ended || userPausedMedia.has(media)) return;
+    if (!backgroundCandidates.has(media)) backgroundCandidates.set(media, {attempts:0, pending:false});
+    if (media.paused && media.readyState >= 2) recoverBackgroundPause(media);
+  }
+  document.addEventListener('canplay', event => prepareBackgroundMedia(event.target), true);
 
   // ─── 2. Pristine Native Descriptor Capture ──────────────────────────────────
   const nativeDescriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
@@ -237,7 +260,17 @@
     if (event.data.type === 'LI_SET_BACKGROUND_PLAY') {
       backgroundPlayEnabled = !!event.data.enabled;
       if (!backgroundPlayEnabled) backgroundCandidates.clear();
-      else if (actuallyInBackground()) rememberPlayingMedia();
+      else if (actuallyInBackground()) {
+        rememberPlayingMedia();
+        document.querySelectorAll('video').forEach(prepareBackgroundMedia);
+      }
+      return;
+    }
+
+    if (event.data.type === 'LI_SET_AUTOPLAY_STATE') {
+      automationPlaybackEnabled = !!event.data.enabled;
+      if (!automationPlaybackEnabled) backgroundCandidates.clear();
+      else document.querySelectorAll('video').forEach(prepareBackgroundMedia);
       return;
     }
 
