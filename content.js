@@ -190,6 +190,52 @@ async function reloadForPlaybackRecovery() {
   } finally { recoveryReloadInFlight = false; }
 }
 
+let extensionContextStopped = false;
+let contentObserver = null;
+let pendingLessonNavigation = null;
+function stopInvalidatedContentContext() {
+  if (extensionContextStopped) return;
+  extensionContextStopped = true;
+  quizRunEpoch++; quizAutoPaused = true; isBulkActive = false;
+  isDiscoveringPathQueue = false; isNavigatingToLesson = false;
+  for (const timer of [watchdogInterval, keepaliveInterval, spaMonitorInterval]) if (timer) clearInterval(timer);
+  for (const timer of [navWatchdogTimer, nonVideoTimer, quizAutoTriggerTimer]) if (timer) clearTimeout(timer);
+  pendingLessonNavigation = null;
+  contentObserver?.disconnect?.();
+  _listenerController?.abort();
+  try { keepalivePort?.disconnect(); } catch (_) {}
+  window.postMessage({type:'LI_SET_AUTOPLAY_STATE',enabled:false}, window.location.origin);
+  window.postMessage({type:'LI_SET_BACKGROUND_PLAY',enabled:false}, window.location.origin);
+  window.postMessage({type:'LI_FORCE_SPEED',enabled:false,speed:1}, window.location.origin);
+  showHUD('Extension was updated or reloaded. Refresh this LinkedIn tab to reconnect AutoPilot.', 'warn');
+}
+function isExtensionContextActive() {
+  if (extensionContextStopped) return false;
+  try { if (chrome.runtime?.id) return true; } catch (_) {}
+  stopInvalidatedContentContext();
+  return false;
+}
+function sendRuntimeRequest(message, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Extension request timed out. Retry this item.')), timeoutMs);
+    const fail = error => {
+      clearTimeout(timer);
+      if (/extension context invalidated/i.test(error?.message || '')) stopInvalidatedContentContext();
+      reject(error);
+    };
+    try {
+      chrome.runtime.sendMessage(message, response => {
+        const error = chrome.runtime.lastError;
+        if (error) { fail(new Error(error.message)); return; }
+        clearTimeout(timer); resolve(response);
+      });
+    } catch (error) { fail(error); }
+  });
+}
+function recoverPendingLessonNavigation() {
+  if (pendingLessonNavigation && Date.now() - pendingLessonNavigation.startedAt >= 4000) pendingLessonNavigation.finish();
+}
+
 const log = (...args) => console.log('[LI-Learn]', ...args);
 
 async function addLog(message, type = 'info') {
@@ -334,14 +380,20 @@ function isLessonCompleted(container) {
   };
 
   const lessonLink = fullRow.querySelector('a.classroom-toc-item__link');
-  if (lessonLink?.hasAttribute('data-live-test-classroom-toc-item-completed')) return true;
+  if (lessonLink?.hasAttribute('data-live-test-classroom-toc-item-completed')) {
+    const value = lessonLink.getAttribute('data-live-test-classroom-toc-item-completed');
+    return !/^(?:false|0|no)$/i.test(value || '');
+  }
 
   // 1. Text checks (Multilingual: EN, ID, ES, FR, DE)
-  const text = ((container.innerText || '') + ' ' + (fullRow.innerText || '')).toLowerCase();
+  const rowText = ((container.innerText || '') + ' ' + (fullRow.innerText || '')).toLowerCase();
+  const lessonTitle = (lessonLink?.innerText || '').trim().toLowerCase();
+  const text = lessonTitle ? rowText.split(lessonTitle).join('') : rowText;
   const completionRegex = /\b(?:completed|watched|viewed|passed|quiz passed|selesai|lulus|ditonton|completado|visto|aprobado|terminé|réussi|abgeschlossen|bestanden)\b/i;
-  const negativeRegex = /\b(?:not completed|not viewed|unwatched|not started|belum selesai|belum dimulai|no completado|non terminé)\b/i;
+  const negativeRegex = /\b(?:not completed|not viewed|not watched|not passed|incomplete|unwatched|not started|belum selesai|belum dimulai|no completado|non terminé)\b/i;
 
-  if (completionRegex.test(text) && !negativeRegex.test(text)) {
+  if (negativeRegex.test(text)) return false;
+  if (completionRegex.test(text)) {
     return true;
   }
 
@@ -353,7 +405,8 @@ function isLessonCompleted(container) {
     ...ariaEls.map((el) => el.getAttribute('aria-label') || '')
   ].join(' ').toLowerCase();
 
-  if (completionRegex.test(allAria) && !negativeRegex.test(allAria)) {
+  if (negativeRegex.test(allAria)) return false;
+  if (completionRegex.test(allAria)) {
     return true;
   }
 
@@ -455,6 +508,7 @@ function getCourseSyllabus() {
     const rawHref = a.getAttribute('href') || a.href;
     let lessonUrl;
     try { lessonUrl = new URL(rawHref, window.location.href); } catch (e) { continue; }
+    if (lessonUrl.origin !== window.location.origin) continue;
     const cleanHref = lessonUrl.pathname;
     if (!cleanHref.startsWith(`/learning/${courseSlug}/`) &&
         !cleanHref.startsWith(`/learning-career-hub/${courseSlug}/`) &&
@@ -920,7 +974,7 @@ function showHUD(message, type = 'info') {
 
   if (hudTimeout) clearTimeout(hudTimeout);
   const icon = type === 'error' ? '❌' : type === 'success' ? '✅' : '⚡';
-  hud.innerHTML = `<span>${icon}</span><span>${message}</span>`;
+  hud.textContent = `${icon} ${message}`;
   hud.style.display = 'flex';
   hud.style.opacity = '1';
   hud.style.transform = 'translateY(0)';
@@ -1591,9 +1645,7 @@ Output ONLY a valid JSON object without Markdown formatting:
   "rationale": "One concise sentence reasoning"
 }`;
 
-  const response = await new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'ASK_AI', prompt }, resolve);
-  });
+  const response = await sendRuntimeRequest({action:'ASK_AI', prompt});
 
   if (!response?.success || !response.text) {
     throw new Error(response?.error || 'AI provider returned no answer. Check your API key.');
@@ -2232,6 +2284,7 @@ function findEarlierUnfinishedLesson(syllabus, path, mode = 'pending_only') {
 }
 
 async function runAutonomousStep() {
+  if (!isExtensionContextActive()) return;
   if (isDiscoveringPathQueue || !isBulkActive || (!backgroundRun && document.hidden)) return;
   if (isRunningAutonomousStep || isNavigatingToLesson) {
     return;
@@ -2519,7 +2572,7 @@ async function handleVideoEnded(currentPath, currentLessonIndex, mode = 'pending
     const syllabus = getCourseSyllabus();
     const curr = syllabus.find((l) => {
       const h = (l.href || '').toLowerCase();
-      return h.includes(currentPath) || currentPath.includes(h);
+      return h === currentPath;
     });
     if (curr && curr.completed) {
       log('Video green checkmark registered!');
@@ -2617,7 +2670,10 @@ function navigateToLesson(lesson, {allowAutoplay = false} = {}) {
   isNavigatingToLesson = true;
 
   if (navWatchdogTimer) clearTimeout(navWatchdogTimer);
-  navWatchdogTimer = setTimeout(() => {
+  const navigation = {startedAt:Date.now(), finish:null};
+  const finishNavigation = () => {
+    if (pendingLessonNavigation !== navigation) return;
+    pendingLessonNavigation = null;
     isNavigatingToLesson = false;
     const currentClean = window.location.pathname.split('?')[0].split('#')[0].toLowerCase();
     const targetClean = lesson.href.split('?')[0].split('#')[0].toLowerCase();
@@ -2625,7 +2681,10 @@ function navigateToLesson(lesson, {allowAutoplay = false} = {}) {
       log('Navigation timeout. Forcing window.location:', targetUrl);
       window.location.href = targetUrl;
     }
-  }, 4000);
+  };
+  navigation.finish = finishNavigation;
+  pendingLessonNavigation = navigation;
+  navWatchdogTimer = setTimeout(finishNavigation, 4000);
 
   try {
     if (lesson.element && lesson.element.isConnected) {
@@ -2793,6 +2852,8 @@ function startWatchdog() {
 }
 
 function runPlaybackWatchdog() {
+    if (!isExtensionContextActive()) return;
+    recoverPendingLessonNavigation();
     syncBackgroundSupervision();
     if (recoverBlockedPlayback()) return;
     const currentVideo = document.querySelector('video');
@@ -2840,9 +2901,12 @@ function runPlaybackWatchdog() {
         if (skipNonVideos && autoplayEnabled && autoNavigateEnabled &&
             !getCourseSyllabus().some(item => item.href === window.location.pathname && item.isVideo)) {
           if (!nonVideoTimer) {
+            const skipEpoch = quizRunEpoch, skipPath = window.location.pathname;
             nonVideoTimer = setTimeout(() => {
               nonVideoTimer = null;
-              if (skipNonVideos && autoplayEnabled && autoNavigateEnabled && !document.querySelector('video')) {
+              if (skipEpoch === quizRunEpoch && skipPath === window.location.pathname && !quizAutoPaused &&
+                  skipNonVideos && autoplayEnabled && autoNavigateEnabled && !isQuizOnPage() &&
+                  !document.querySelector('video') && !getCourseSyllabus().some(item => item.href === skipPath && item.isVideo)) {
                 goToNextLesson();
               }
             }, 4000);
@@ -2958,14 +3022,15 @@ function startObserver() {
 
   tryFind();
 
-  const observer = new MutationObserver(tryFind);
-  observer.observe(document.body, { childList: true, subtree: true });
+  contentObserver = new MutationObserver(tryFind);
+  contentObserver.observe(document.body, { childList: true, subtree: true });
 }
 
 // ─── SPA Navigation Monitor (Non-Invasive) ───────────────────────────────────
 
 let lastMonitoredUrl = window.location.href;
-setInterval(() => {
+const spaMonitorInterval = setInterval(() => {
+  if (!isExtensionContextActive()) return;
   if (window.location.href !== lastMonitoredUrl) {
     if (isSolvingQuiz || isQuizWorkflowRunning) {
       quizRunEpoch++;
@@ -2978,6 +3043,7 @@ setInterval(() => {
     quizAutoTriggerTimer = null;
     log('SPA Navigation detected:', lastMonitoredUrl);
     isNavigatingToLesson = false;
+    pendingLessonNavigation = null;
     if (navWatchdogTimer) {
       clearTimeout(navWatchdogTimer);
       navWatchdogTimer = null;
@@ -3089,7 +3155,10 @@ async function init() {
 
 }
 
-init();
+init().catch(error => {
+  if (/extension context invalidated/i.test(error?.message || '')) stopInvalidatedContentContext();
+  else { log('Initialization failed:', error); showHUD('AutoPilot could not initialize. Refresh the LinkedIn tab.', 'error'); }
+});
 
 function getVisibleLearningPaths() {
   const seen = new Set();
@@ -3213,18 +3282,23 @@ async function startAllPaths({resumeDiscovery = false} = {}) {
 }
 
 async function advancePathQueue() {
-  const { pathQueueActive, pathQueue = [], pathQueueIndex = 0 } = await chrome.storage.local.get(['pathQueueActive', 'pathQueue', 'pathQueueIndex']);
-  if (!pathQueueActive || !isBulkActive || !autoNavigateEnabled) return false;
-  const current = pathQueue[pathQueueIndex];
-  if (!current || new URL(current.url).pathname !== window.location.pathname) return false;
+  const epoch = quizRunEpoch, sourcePath = window.location.pathname;
+  const allowed = () => epoch === quizRunEpoch && !quizAutoPaused && isBulkActive &&
+    autoNavigateEnabled && window.location.pathname === sourcePath;
+  const {pathQueueActive, pathQueue = [], pathQueueIndex = 0} =
+    await chrome.storage.local.get(['pathQueueActive', 'pathQueue', 'pathQueueIndex']);
+  if (!allowed() || !pathQueueActive) return false;
+  const current = pathQueue[pathQueueIndex], currentUrl = current && validLearningPathUrl(current.url);
+  if (!currentUrl || new URL(currentUrl).pathname !== sourcePath) return false;
+  const nextIndex = pathQueueIndex + 1, next = pathQueue[nextIndex];
+  const nextUrl = next && validLearningPathUrl(next.url);
+  if (next && !nextUrl) { await addLog('Queued path has an invalid LinkedIn URL. Restart My Content discovery.', 'error'); return false; }
   current.completed = true;
-  const nextIndex = pathQueueIndex + 1;
-  const next = pathQueue[nextIndex];
-  await chrome.storage.local.set({ pathQueue, pathQueueIndex: nextIndex, pathQueueActive: !!next });
-  if (!next || !isBulkActive || !autoNavigateEnabled) return false;
-  await chrome.storage.local.set({ learningPathActive: true, lastLearningPathUrl: next.url, bulkActive: true });
-  if (!isBulkActive) return false;
-  window.location.href = next.url;
+  await chrome.storage.local.set({pathQueue, pathQueueIndex:nextIndex, pathQueueActive:!!next});
+  if (!next || !allowed()) return false;
+  await chrome.storage.local.set({learningPathActive:true, lastLearningPathUrl:nextUrl, bulkActive:true});
+  if (!allowed()) return false;
+  window.location.href = nextUrl;
   return true;
 }
 
@@ -3439,10 +3513,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.autoSolve || changes.autoSolveQuizzes) autoSolveQuizzes = (changes.autoSolve || changes.autoSolveQuizzes).newValue !== false;
   if (changes.focusMode) focusMode = changes.focusMode.newValue || 'pending_only';
   if (changes.strictCompletion) strictCompletionEnabled = changes.strictCompletion.newValue !== false;
-  if (changes.bulkActive && changes.bulkActive.newValue === false) isBulkActive = false;
+  if (changes.bulkActive && changes.bulkActive.newValue === false) {
+    if (!isDiscoveringPathQueue && (isBulkActive || changes.bulkActive.oldValue === true)) {
+      quizRunEpoch++; quizAutoPaused = true;
+      if (quizAutoTriggerTimer) clearTimeout(quizAutoTriggerTimer);
+      quizAutoTriggerTimer = null;
+    }
+    isBulkActive = false;
+  }
   if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay || changes.autoplay) syncPlaybackSettings();
   if (changes.bgPlay || changes.bulkActive || changes.autoplay) syncBackgroundSupervision();
-  const providerChanged = ['groqApiKey', 'geminiApiKey', 'openRouterApiKey', 'nvidiaApiKey', 'selectedProvider'].some(key => changes[key]);
+  const providerChanged = ['groqApiKey', 'geminiApiKey', 'openRouterApiKey', 'nvidiaApiKey', 'preferredProvider'].some(key => changes[key]);
   if (providerChanged || ((changes.autoSolve || changes.autoSolveQuizzes) && autoSolveQuizzes)) {
     quizAutoPaused = false; quizError = null; quizErrorUrl = null; lastQuizCheckTime = 0;
     checkAndAutoSolveQuiz();

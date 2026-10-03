@@ -197,7 +197,7 @@ test('current chapter quiz parser ignores unrelated page inputs', async () => {
 test('empty native Viewed marker counts as completed', async () => {
   const c = await content({});
   const row = { closest: () => null, querySelectorAll: () => [],
-    querySelector: () => ({ hasAttribute: attr => attr === 'data-live-test-classroom-toc-item-completed' }) };
+    querySelector: () => ({ hasAttribute: attr => attr === 'data-live-test-classroom-toc-item-completed', getAttribute: () => '' }) };
   c.ctx.row = row;
   assert.equal(vm.runInContext('isLessonCompleted(row)', c.ctx), true);
 });
@@ -857,4 +857,114 @@ test('network evidence for another quiz cannot complete the current quiz', async
   c.ctx.setTimeout = fn => setImmediate(fn);
   vm.runInContext("networkCompletionSignals.set('/learning/example/quiz/other', {kind:'quiz',startedAt:Date.now(),observedAt:Date.now()})",c.ctx);
   assert.equal(await vm.runInContext('verifyQuizGreenTick(10)',c.ctx),false);
+});
+
+function statusRow({title='',text='',marker=null,aria=''}={}) {
+ const link={innerText:title,hasAttribute:()=>marker!==null,getAttribute:()=>marker};
+ const row={innerText:text,className:'',closest:()=>row,getAttribute:name=>name==='aria-label'?aria:null,
+ querySelector:selector=>selector==='a.classroom-toc-item__link'?link:null,querySelectorAll:()=>[]};
+ return row;
+}
+test('explicit false Viewed marker does not complete an unfinished lesson',async()=>{
+ const c=await content({});c.ctx.row=statusRow({title:'Chapter Quiz',text:'Chapter Quiz 9 questions',marker:'false'});
+ assert.equal(vm.runInContext('isLessonCompleted(row)',c.ctx),false);
+});
+test('completion words in a lesson title are not completion status',async()=>{
+ const c=await content({});c.ctx.row=statusRow({title:'Completed projects',text:'Completed projects\n3m 14s video'});
+ assert.equal(vm.runInContext('isLessonCompleted(row)',c.ctx),false);
+});
+test('Not passed status overrides a positive-looking completion label',async()=>{
+ const c=await content({});c.ctx.row=statusRow({title:'Chapter Quiz',text:'Chapter Quiz\nNot passed',aria:'Completed'});
+ assert.equal(vm.runInContext('isLessonCompleted(row)',c.ctx),false);
+});
+test('completion status remains valid when it is separate from the title',async()=>{
+ const c=await content({});c.ctx.row=statusRow({title:'Completed projects',text:'Completed projects\nViewed'});
+ assert.equal(vm.runInContext('isLessonCompleted(row)',c.ctx),true);
+});
+test('unanswered extension request times out rather than locking a workflow forever',async()=>{
+ const c=await content({});const pending=vm.runInContext("sendRuntimeRequest({action:'ASK_AI'},100)",c.ctx);
+ const rejected=assert.rejects(pending,/timed out/);c.timers.at(-1)();await rejected;
+});
+test('extension callback failures are surfaced to the caller',async()=>{
+ const c=await content({});
+ c.chrome.runtime.sendMessage=(message,reply)=>{c.chrome.runtime.lastError={message:'Receiving end does not exist'};reply();delete c.chrome.runtime.lastError;};
+ await assert.rejects(vm.runInContext("sendRuntimeRequest({action:'ASK_AI'})",c.ctx),/Receiving end/);
+});
+test('Stop through storage cancels work in a background tab',async()=>{
+ const c=await content({});vm.runInContext('isBulkActive=true; quizAutoPaused=false',c.ctx);
+ const epoch=vm.runInContext('quizRunEpoch',c.ctx);
+ c.storage[0]({bulkActive:{oldValue:true,newValue:false}},'local');
+ assert.equal(vm.runInContext('isBulkActive',c.ctx),false);
+ assert.equal(vm.runInContext('quizAutoPaused',c.ctx),true);
+ assert.ok(vm.runInContext('quizRunEpoch',c.ctx)>epoch);
+});
+test('path discovery can turn bulk off without cancelling its own discovery',async()=>{
+ const c=await content({});vm.runInContext('isBulkActive=false; isDiscoveringPathQueue=true; quizAutoPaused=false',c.ctx);
+ const epoch=vm.runInContext('quizRunEpoch',c.ctx);
+ c.storage[0]({bulkActive:{oldValue:true,newValue:false}},'local');
+ assert.equal(vm.runInContext('quizAutoPaused',c.ctx),false);
+ assert.equal(vm.runInContext('quizRunEpoch',c.ctx),epoch);
+});
+test('changing preferredProvider clears the quiz error for retry',async()=>{
+ const c=await content({});vm.runInContext("quizError='old provider failure'; quizAutoPaused=true; checkAndAutoSolveQuiz=()=>{}",c.ctx);
+ c.storage[0]({preferredProvider:{newValue:'groq'}},'local');
+ assert.equal(vm.runInContext('quizError',c.ctx),null);
+ assert.equal(vm.runInContext('quizAutoPaused',c.ctx),false);
+});
+test('HUD treats an error message as plain text',async()=>{
+ const c=await content({});const hud={style:{},innerHTML:'unchanged'};
+ c.document.getElementById=()=>hud;c.ctx.message='<img src=x onerror=alert(1)>';
+ vm.runInContext("showHUD(message,'warn')",c.ctx);
+ assert.equal(hud.innerHTML,'unchanged');assert.ok(hud.textContent.includes(c.ctx.message));
+});
+test('a delayed skip does not run after switching into a quiz',async()=>{
+ const c=await content({});let navigations=0;c.ctx.navigate=()=>{navigations++;};
+ vm.runInContext('getCourseSyllabus=()=>[]; isQuizOnPage=()=>false; goToNextLesson=navigate; runPlaybackWatchdog()',c.ctx);
+ const skip=c.timers.at(-1);c.window.location.pathname='/learning/example/quiz/one';
+ vm.runInContext('isQuizOnPage=()=>true',c.ctx);skip();assert.equal(navigations,0);
+});
+test('a delayed skip waits if the syllabus identifies a loading video',async()=>{
+ const c=await content({});let navigations=0;c.ctx.navigate=()=>{navigations++;};
+ vm.runInContext('getCourseSyllabus=()=>[]; isQuizOnPage=()=>false; goToNextLesson=navigate; runPlaybackWatchdog()',c.ctx);
+ const skip=c.timers.at(-1);vm.runInContext('getCourseSyllabus=()=>[{href:window.location.pathname,isVideo:true}]',c.ctx);
+ skip();assert.equal(navigations,0);
+});
+test('navigation fallback can recover from a throttled timer using elapsed time',async()=>{
+ const c=await content({});c.ctx.lesson={href:'/learning/example/next',fullHref:'https://www.linkedin.com/learning/example/next',
+ element:{isConnected:true,click:noop}};
+ vm.runInContext('isBulkActive=true; navigateToLesson(lesson); pendingLessonNavigation.startedAt=Date.now()-5000; recoverPendingLessonNavigation()',c.ctx);
+ assert.equal(c.window.location.href,c.ctx.lesson.fullHref);
+});
+test('an old navigation timer cannot override a new destination',async()=>{
+ const c=await content({});c.ctx.first={href:'/learning/example/first',element:{isConnected:true,click:noop}};
+ c.ctx.second={href:'/learning/example/second',element:{isConnected:true,click:noop}};
+ vm.runInContext('isBulkActive=true; navigateToLesson(first)',c.ctx);const old=c.timers.at(-1);
+ vm.runInContext('navigateToLesson(second)',c.ctx);old();
+ assert.equal(c.window.location.href,'https://www.linkedin.com/learning/example/lesson');
+});
+test('invalidated extension context stops timers and asks for a tab refresh',async()=>{
+ const c=await content({});let notice='';c.ctx.notice=message=>{notice=message;};
+ vm.runInContext('showHUD=notice; isBulkActive=true',c.ctx);delete c.chrome.runtime.id;
+ vm.runInContext('runPlaybackWatchdog()',c.ctx);
+ assert.equal(vm.runInContext('extensionContextStopped',c.ctx),true);
+ assert.equal(vm.runInContext('isBulkActive',c.ctx),false);assert.match(notice,/Refresh/);
+ assert.equal(c.saved.bulkActive,undefined);
+});
+
+test('false Viewed marker stays incomplete despite a stale completed class',async()=>{
+ const c=await content({});c.ctx.row=statusRow({title:'Chapter Quiz',text:'Chapter Quiz 9 questions',marker:'false'});
+ c.ctx.row.className='classroom-toc-item--completed';assert.equal(vm.runInContext('isLessonCompleted(row)',c.ctx),false);
+});
+test('queued path advancement from an old run cannot move a newly started run',async()=>{
+ const c=await content({},'https://www.linkedin.com/learning/paths/one');
+ let resolve;const gate=new Promise(r=>{resolve=r;});c.chrome.storage.local.get=async()=>gate;
+ vm.runInContext('isBulkActive=true',c.ctx);const pending=vm.runInContext('advancePathQueue()',c.ctx);
+ vm.runInContext('quizRunEpoch++; isBulkActive=true',c.ctx);
+ resolve({pathQueueActive:true,pathQueueIndex:0,pathQueue:[{url:c.window.location.href},{url:'https://www.linkedin.com/learning/paths/two'}]});
+ assert.equal(await pending,false);assert.equal(c.window.location.href,'https://www.linkedin.com/learning/paths/one');
+});
+test('malformed queued paths are rejected without throwing',async()=>{
+ const c=await content({},'https://www.linkedin.com/learning/paths/one');
+ c.chrome.storage.local.get=async()=>({pathQueueActive:true,pathQueue:[{url:'https://other.example/learning/paths/one'}]});
+ vm.runInContext('isBulkActive=true',c.ctx);assert.equal(await vm.runInContext('advancePathQueue()',c.ctx),false);
 });

@@ -31,7 +31,7 @@ function watchdogFixture({lastRun=10000,rate=1,locked=false,quiz=false}={}) {
  let runs=0,speedUpdates=0;
  const video={paused:false,ended:false,playbackRate:rate};
  const globals={
- syncBackgroundSupervision:()=>{},recoverBlockedPlayback:()=>false,document:{querySelector:()=>video},
+ isExtensionContextActive:()=>true,recoverPendingLessonNavigation:()=>{},syncBackgroundSupervision:()=>{},recoverBlockedPlayback:()=>false,document:{querySelector:()=>video},
  videoEl:video,attachToVideo:()=>{},isDiscoveringPathQueue:false,
  isBulkActive:true,isQuizOnPage:()=>quiz,speedInjectionEnabled:true,currentSpeed:16,
  lastRateChangeTime:0,Date:{now:()=>20000},applySpeed:()=>{speedUpdates++;},

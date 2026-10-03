@@ -50,7 +50,9 @@
         if (['COMPLETED','IN_PROGRESS','NOT_STARTED'].includes(state?.currentClientProgressState)) emit(state.currentClientProgressState);
       } else {
         // Only the submitted assessment's basic status, not an unrelated nested record.
-        const row = (response?.included || []).find(item => /\.ConsistentBasicAssessmentStatus$/.test(item.$type || ''));
+        const rows = (response?.included || []).filter(item => /\.ConsistentBasicAssessmentStatus$/.test(item.$type || ''));
+        if (rows.length !== 1) return; // Ambiguous response: defer to the page's completion status.
+        const row = rows[0];
         const detail = row?.details;
         if (detail?.statusType === 'COMPLETED' && Number.isFinite(detail.completedAt)) emit('COMPLETED');
         else if (meta.action === 'reset' || detail?.statusType === 'IN_PROGRESS') emit('IN_PROGRESS');
