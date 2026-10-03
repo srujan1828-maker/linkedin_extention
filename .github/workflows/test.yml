@@ -1,0 +1,22 @@
+name: Extension regression tests
+on:
+  pull_request:
+  push:
+    branches: [master, codex/keep-quizzes-in-course-order]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check JavaScript syntax
+        run: |
+          node --check content.js
+          node --check background.js
+          node --check page-inject.js
+          node --check network-observer.js
+          node --check popup.js
+      - name: Run regression tests
+        run: node --test tests/*.test.cjs
