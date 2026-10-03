@@ -104,8 +104,7 @@ function recoverBlockedPlayback() {
   });
   if (action === 'retry') { retry.click(); addLog('LinkedIn error page: clicked Try again.', 'warn'); }
   if (action === 'reload') {
-    addLog('No video progress for one minute. Reloading this lesson; AutoPilot state is preserved.', 'warn');
-    window.location.reload();
+    reloadForPlaybackRecovery();
   }
   if (action === 'pause') {
     quizAutoPaused = true;
@@ -115,6 +114,80 @@ function recoverBlockedPlayback() {
     showHUD(message, 'error'); sendProgress({error:true,isRunning:false,message}); addLog(message, 'error');
   }
   return errorPage || !!action;
+}
+
+// Serialize automatic play attempts; Chrome may require muted playback after a reload.
+function createManagedPlayback({now, onMuted, onBlocked}) {
+  const states = new WeakMap();
+  return async function request(video, allowed) {
+    if (!video || !allowed() || video.ended || !video.paused || (video.readyState < 2 && !(video.currentSrc || video.src))) return false;
+    const state = states.get(video) || {pending:false, lastAttempt:-Infinity, blocked:false};
+    states.set(video, state);
+    if (state.pending || now() - state.lastAttempt < 2000) return false;
+    state.pending = true; state.lastAttempt = now();
+    const originalMuted = video.muted;
+    let fallback = false;
+    try {
+      try { await video.play(); }
+      catch (error) {
+        if (error?.name !== 'NotAllowedError' || !allowed() || originalMuted) throw error;
+        fallback = true; video.muted = true;
+        await video.play();
+      }
+      if (fallback) {
+        if (allowed()) onMuted(video, originalMuted);
+        else video.muted = originalMuted;
+      }
+      state.blocked = false;
+      return !video.paused;
+    } catch (error) {
+      if (fallback) video.muted = originalMuted;
+      if (allowed() && !state.blocked) { state.blocked = true; onBlocked(error); }
+      return false;
+    } finally { state.pending = false; }
+  };
+}
+const managedPlayback = createManagedPlayback({
+  now:() => Date.now(),
+  onMuted(video, originalMuted) {
+    const message = 'Chrome blocked autoplay with sound. Playback resumed muted; interact with the page to restore sound.';
+    showHUD(message, 'warn'); addLog(message, 'warn'); sendProgress({message});
+    const restore = event => {
+      if (!event.isTrusted) return;
+      video.muted = originalMuted;
+      document.removeEventListener('pointerdown', restore, true);
+      document.removeEventListener('keydown', restore, true);
+    };
+    document.addEventListener('pointerdown', restore, true);
+    document.addEventListener('keydown', restore, true);
+  },
+  onBlocked(error) {
+    const message = error?.name === 'NotAllowedError'
+      ? 'Chrome still blocked automatic playback. Open this tab and press Play once.'
+      : 'Video playback could not start yet. Waiting for the player to become ready.';
+    showHUD(message, 'warn'); addLog(message, 'warn'); sendProgress({message});
+  }
+});
+function requestManagedPlayback(video) {
+  const epoch = quizRunEpoch, path = window.location.pathname;
+  return managedPlayback(video, () => epoch === quizRunEpoch && path === window.location.pathname &&
+    !quizAutoPaused && !isDiscoveringPathQueue && (isBulkActive || autoplayEnabled) &&
+    (backgroundRun || !document.hidden) && video.isConnected !== false);
+}
+let recoveryReloadInFlight = false;
+async function reloadForPlaybackRecovery() {
+  if (recoveryReloadInFlight || quizAutoPaused) return;
+  recoveryReloadInFlight = true;
+  const epoch = quizRunEpoch, path = window.location.pathname;
+  try {
+    // Finish the checkpoint before destroying this document.
+    await chrome.storage.local.set({bulkActive:isBulkActive, autoplay:autoplayEnabled, bgPlay:backgroundRun});
+    if (epoch !== quizRunEpoch || quizAutoPaused || path !== window.location.pathname) return;
+    await addLog('No video progress for one minute. Reloading with AutoPilot settings saved.', 'warn');
+    if (epoch === quizRunEpoch && !quizAutoPaused && path === window.location.pathname) window.location.reload();
+  } catch (error) {
+    addLog('Could not save playback recovery settings: ' + error.message, 'warn');
+  } finally { recoveryReloadInFlight = false; }
 }
 
 const log = (...args) => console.log('[LI-Learn]', ...args);
@@ -2147,7 +2220,7 @@ async function runStandalonePathVideo() {
       if (isBulkActive && autoNavigateEnabled) await returnToLearningPath();
     } finally { standaloneReturnPending = false; }
   } else if (video.paused && (backgroundRun || !document.hidden)) {
-    video.play().catch(() => showHUD('Press Play to allow browser playback.', 'warn'));
+    requestManagedPlayback(video);
   }
 }
 
@@ -2401,16 +2474,7 @@ async function runAutonomousStep() {
 
       showHUD(`▶ Playing video at ${speedToApply}x (${Math.round(video.currentTime)}s / ${Math.round(video.duration || 0)}s)...`);
 
-      if (video.paused) {
-        video.play().catch(() => {
-          const playBtn = document.querySelector(
-            'button.classroom-video-player__play-pause-button, button[data-control-name="play"], button[aria-label*="Play" i], button[aria-label*="Putar" i], .vjs-play-control, button.play-button'
-          );
-          if (playBtn && isElementClickable(playBtn)) {
-            clickElement(playBtn);
-          }
-        });
-      }
+      if (video.paused) requestManagedPlayback(video);
 
       return;
     }
@@ -2784,7 +2848,7 @@ function runPlaybackWatchdog() {
         stuckCount = 0;
         try {
           videoEl.currentTime = Math.min(videoEl.duration - 0.1, videoEl.currentTime + 0.3);
-          videoEl.play().catch(() => {});
+          requestManagedPlayback(videoEl);
         } catch (e) {}
       }
     } else {
@@ -2794,7 +2858,7 @@ function runPlaybackWatchdog() {
 
     if (videoEl.paused && !videoEl.ended && isBulkActive && (backgroundRun || !document.hidden)) {
       if (videoEl.readyState >= 2) {
-        videoEl.play().catch(() => {});
+        requestManagedPlayback(videoEl);
       }
     }
 }
@@ -2839,11 +2903,13 @@ function attachToVideo(video) {
     }, 800);
   }, { signal });
 
-  video.addEventListener('canplay', () => {
-    if (video.paused && !video.ended && isBulkActive && (backgroundRun || !document.hidden)) {
-      video.play().catch(() => {});
-    }
-  }, { signal });
+  const resumeReadyVideo = () => {
+    if (videoEl === video && video.paused && !video.ended && (isBulkActive || autoplayEnabled)) requestManagedPlayback(video);
+  };
+  video.addEventListener('canplay', resumeReadyVideo, {signal});
+  video.addEventListener('loadeddata', resumeReadyVideo, {signal});
+  video.addEventListener('loadedmetadata', resumeReadyVideo, {signal});
+  if (isBulkActive) resumeReadyVideo();
 
   startWatchdog();
 }
@@ -2967,6 +3033,8 @@ async function init() {
     }
   }
   syncPlaybackSettings();
+  const restoredVideo = document.querySelector('video');
+  if (restoredVideo && isBulkActive) { attachToVideo(restoredVideo); requestManagedPlayback(restoredVideo); }
   rememberLearningPath();
   if (stored.pathQueueDiscoveryActive) {
     isDiscoveringPathQueue = true;
