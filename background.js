@@ -749,3 +749,86 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
+
+function installBackgroundSupervisor(api) {
+  if (!api.alarms || !api.storage.session || !api.tabs?.onUpdated) return;
+  const key = 'learningBackgroundTabs', alarm = 'learning-background-pulse';
+  let serial = Promise.resolve();
+  const enqueue = task => {
+    const next = serial.then(task);
+    serial = next.catch(() => {});
+    return next;
+  };
+  const isLearning = raw => {
+    try { const url = new URL(raw); return url.origin === 'https://www.linkedin.com' &&
+      /^\/(?:learning|learning-career-hub|career-hub)\//.test(url.pathname); } catch (_) { return false; }
+  };
+  const read = async () => (await api.storage.session.get(key))[key] || {};
+  const save = async rows => {
+    await api.storage.session.set({[key]:rows});
+    if (Object.keys(rows).length) await api.alarms.create(alarm, {periodInMinutes:0.5});
+    else await api.alarms.clear(alarm);
+  };
+  const release = async (rows, id) => {
+    const row = rows[id];
+    if (!row) return;
+    delete rows[id];
+    try { await api.tabs.update(Number(id), {autoDiscardable:row.originalAutoDiscardable}); } catch (_) {}
+  };
+  const pulse = async onlyId => {
+    const rows = await read();
+    for (const id of Object.keys(rows)) {
+      if (onlyId !== undefined && Number(id) !== onlyId) continue;
+      try {
+        const tab = await api.tabs.get(Number(id));
+        if (!isLearning(tab.url)) { await release(rows, id); continue; }
+        const response = await api.tabs.sendMessage(Number(id), {action:'backgroundPulse'});
+        if (response?.active === false) await release(rows, id);
+        else if (response?.active === true) rows[id].lastSeen = Date.now();
+      } catch (_) {
+        // Allow page loads to reconnect, then expire abandoned registrations.
+        if (Date.now() - rows[id].lastSeen > 120000) await release(rows, id);
+      }
+    }
+    await save(rows);
+  };
+  api.runtime.onMessage.addListener((message, sender, respond) => {
+    if (message.action !== 'backgroundRunState' || !sender.tab || (sender.frameId || 0) !== 0) return;
+    enqueue(async () => {
+      const rows = await read(), id = sender.tab.id;
+      const tab = await api.tabs.get(id);
+      if (message.enabled && isLearning(tab.url)) {
+        if (!rows[id]) rows[id] = {originalAutoDiscardable:tab.autoDiscardable !== false};
+        rows[id].lastSeen = Date.now();
+        await api.storage.session.set({[key]:rows});
+        await api.tabs.update(id, {autoDiscardable:false});
+      } else await release(rows, id);
+      await save(rows);
+      return {success:true};
+    }).then(respond, () => respond({success:false}));
+    return true;
+  });
+  api.alarms.onAlarm.addListener(event => {
+    if (event.name === alarm) enqueue(() => pulse());
+  });
+  api.tabs.onUpdated.addListener((id, changes) => {
+    if (changes.url && !isLearning(changes.url)) enqueue(async () => {
+      const rows = await read(); await release(rows, id); await save(rows);
+    });
+    else if (changes.status === 'complete') enqueue(() => pulse(id));
+  });
+  api.tabs.onRemoved.addListener(id => enqueue(async () => {
+    const rows = await read(); delete rows[id]; await save(rows);
+  }));
+  api.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes.bgPlay?.newValue === false) enqueue(async () => {
+      const rows = await read();
+      for (const id of Object.keys(rows)) await release(rows, id);
+      await save(rows);
+    });
+  });
+  // Session storage survives service-worker suspension; recreate lost alarms.
+  enqueue(async () => { const rows = await read(); await save(rows); });
+}
+
+installBackgroundSupervisor(chrome);

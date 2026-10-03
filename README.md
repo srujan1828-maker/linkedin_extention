@@ -1,6 +1,6 @@
 # LinkedIn Learning AI AutoPilot
 
-A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.6**.
+A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.8**.
 
 ## Installation
 
@@ -50,3 +50,15 @@ node --check popup.js
 ```
 
 The regression tests use mocked browser and extension APIs, including a complete single-question chapter-quiz flow from provider response through native selection, submission and verification. They cover settings, playback preferences, Stop cancellation, AI request isolation, active-question parsing, invalid-answer rejection, single-click input selection, path card extraction, context preservation, and queue progress. The current path, sidebar, standalone-player, library-pagination, and chapter-quiz markup were inspected in signed-in LinkedIn Learning. Full path completion and live AI submissions have not been tested end to end.
+
+### Background reliability (10.8.8)
+
+With Background Tab Playback enabled, active runs register with a service-worker supervisor. Chrome alarms nudge the page every 30 seconds, and active learning tabs are protected from automatic memory discard. Registrations survive service-worker restarts. Stop, disabling background playback, finishing the run, or leaving Learning releases protection and restores the original tab setting. Transient page loads get a reconnect grace period; abandoned registrations expire.
+
+Routine HUD updates are suppressed during background AutoPilot runs, repeated identical progress reports are coalesced, and the always-open keepalive ping connection is replaced by alarm supervision. Errors and completion reports remain immediate. This requires Chrome 120 or later and adds the alarms permission. Keep Chrome, the learning tab and the computer running; alarms do not make a frozen page execute and cannot work while the computer sleeps. The page still performs playback and course navigation; this does not mark content complete through private APIs.
+
+### Passive completion monitoring (10.8.8)
+
+The extension observes existing LinkedIn fetch/XHR responses for video progress and quiz status. It binds content identities from metadata responses to the exact lesson route, then accepts successful completion responses only for that identity. Completion evidence supplements delayed sidebar markers and nudges the existing runner. Errors, application errors, unknown content, expired evidence, prior lessons and responses preceding a new run cannot mark the current item complete. Reset/IN_PROGRESS responses invalidate completion evidence; Stop clears it and cancels delayed continuation.
+
+The bridge sends only item kind, status, route and timestamps. Request headers, cookies, quiz answers and HAR files are not stored or sent to the extension. No private endpoint is replayed; failed progress writes are logged rather than automatically resubmitted. LinkedIn's next-incomplete-item request returned 204 in the capture, which does not establish a navigation destination, so existing page navigation remains authoritative. DOM checks remain the fallback if private response formats change.

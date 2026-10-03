@@ -824,7 +824,7 @@ test('Stop cancels result continuation during the verification storage wait', as
   const c = await content({});
   const f = practiceResultFixture(c);
   let resolveSettings;
-  c.chrome.storage.local.get = () => new Promise(resolve => {resolveSettings = resolve;});
+  c.chrome.storage.local.get = keys => keys.includes('focusMode') ? new Promise(resolve => {resolveSettings = resolve;}) : Promise.resolve(c.saved);
   const pending = vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)', c.ctx);
   await new Promise(resolve => setImmediate(resolve));
   c.runtime[0]({action:'stopBulkComplete'}, {}, noop);
@@ -840,4 +840,21 @@ test('ordinary quiz questions still override old sidebar completion marks', asyn
   vm.runInContext('getCourseSyllabus = () => [{href:window.location.pathname, completed:true}]', c.ctx);
   assert.equal(vm.runInContext('getQuizResultState().visible', c.ctx), false);
   assert.equal(await vm.runInContext('verifyQuizGreenTick(10)', c.ctx), false);
+});
+
+
+test('server-confirmed completion advances a quiz with a stale sidebar marker', async () => {
+  const c = await content({});
+  const f = practiceResultFixture(c, false);
+  vm.runInContext("networkCompletionSignals.set(window.location.pathname, {kind:'quiz',startedAt:Date.now(),observedAt:Date.now()}); isBulkActive=true",c.ctx);
+  assert.equal(await vm.runInContext('solveLinkedInQuizWithGreenTickRetry(1)',c.ctx),true);
+  assert.equal(c.window.location.href,f.next.fullHref);
+  assert.equal(vm.runInContext('isBulkActive',c.ctx),true);
+});
+
+test('network evidence for another quiz cannot complete the current quiz', async () => {
+  const c = await content({}); practiceResultFixture(c,false);
+  c.ctx.setTimeout = fn => setImmediate(fn);
+  vm.runInContext("networkCompletionSignals.set('/learning/example/quiz/other', {kind:'quiz',startedAt:Date.now(),observedAt:Date.now()})",c.ctx);
+  assert.equal(await vm.runInContext('verifyQuizGreenTick(10)',c.ctx),false);
 });

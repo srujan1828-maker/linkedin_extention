@@ -93,7 +93,7 @@ function connectKeepalivePort() {
   }
 }
 
-connectKeepalivePort();
+// Background supervision uses Chrome alarms instead of an always-open ping port.
 
 function startAudioKeepalive() {
   // Non-invasive no-op: background playback is maintained by Page Visibility spoofing in page-inject.js
@@ -334,7 +334,8 @@ function getCourseSyllabus() {
     if (!seen.has(cleanHref)) {
       seen.add(cleanHref);
       const rowContainer = a.closest('li') || a.parentElement || a;
-      const completed = isLessonCompleted(rowContainer);
+      const completed = isLessonCompleted(rowContainer) || hasNetworkCompletion(cleanHref,
+        /quiz|assessment|exam/i.test(cleanHref + ' ' + title) ? 'quiz' : 'video');
 
       const rowText = (rowContainer.innerText || '').toLowerCase();
       const hasVideoDuration = /\b\d+\s*(?:mnt|min|m|sec|dtk|s)\b|\bvideo\b/i.test(rowText);
@@ -732,7 +733,11 @@ function dismissSurveyIfPresent() {
 
 // ─── Progress Reporting ───────────────────────────────────────────────────────
 
+let lastProgressSignature = '', lastProgressSentAt = 0;
 function sendProgress(data) {
+  const signature = JSON.stringify(data), now = Date.now();
+  if (!data.error && !data.isDone && signature === lastProgressSignature && now - lastProgressSentAt < 2000) return;
+  lastProgressSignature = signature; lastProgressSentAt = now;
   try {
     chrome.runtime.sendMessage({ action: 'bulkProgress', ...data });
   } catch (e) {}
@@ -750,6 +755,7 @@ function sendProgress(data) {
 
 let hudTimeout = null;
 function showHUD(message, type = 'info') {
+  if (backgroundRun && (isBulkActive || isDiscoveringPathQueue) && type !== 'error' && type !== 'warn') return;
   if (!document.body) return;
   let hud = document.getElementById('li-autopilot-hud');
   if (!hud) {
@@ -1824,11 +1830,48 @@ async function solveLinkedInQuiz() {
 
 // ─── 🛡️ Green Tick Verification & Auto-Retry Engine ─────────────────────────
 
+const networkCompletionSignals = new Map();
+let networkSignalsSince = Date.now();
+let lastNetworkFailureLog = 0;
+function resetNetworkCompletionSignals() {
+  networkSignalsSince = Date.now();
+  networkCompletionSignals.clear();
+}
+function hasNetworkCompletion(path, kind) {
+  const signal = networkCompletionSignals.get(path);
+  return !!signal && signal.kind === kind && signal.startedAt >= networkSignalsSince &&
+    Date.now() - signal.observedAt < 120000;
+}
+window.addEventListener('message', event => {
+  if (event.source !== window || event.origin !== window.location.origin || event.data?.type !== 'LI_NETWORK_STATUS') return;
+  const signal = event.data;
+  if (!['video','quiz'].includes(signal.kind) || !['COMPLETED','IN_PROGRESS','NOT_STARTED','FAILED'].includes(signal.status) ||
+      signal.path !== window.location.pathname || !Number.isFinite(signal.startedAt) || !Number.isFinite(signal.observedAt) ||
+      signal.startedAt < networkSignalsSince || signal.observedAt < signal.startedAt ||
+      signal.observedAt > Date.now() + 1000 || Date.now() - signal.observedAt > 120000 || quizAutoPaused) return;
+  if (signal.status === 'COMPLETED') {
+    networkCompletionSignals.set(signal.path, {kind:signal.kind,startedAt:signal.startedAt,observedAt:signal.observedAt});
+    if (networkCompletionSignals.size > 50) networkCompletionSignals.delete(networkCompletionSignals.keys().next().value);
+    setTimeout(() => {
+      if (quizAutoPaused || isDiscoveringPathQueue || window.location.pathname !== signal.path) return;
+      if (isBulkActive) runAutonomousStep();
+      else checkAndAutoSolveQuiz();
+    }, 150);
+  } else {
+    networkCompletionSignals.delete(signal.path);
+    if (signal.status === 'FAILED' && Date.now() - lastNetworkFailureLog > 30000) {
+      lastNetworkFailureLog = Date.now();
+      addLog('LinkedIn did not accept a progress update. Waiting for verified completion; the request was not replayed.', 'warn');
+    }
+  }
+});
+
 async function verifyQuizGreenTick(maxWaitMs = 5000, quizPath = window.location.pathname, epoch = quizRunEpoch) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     if (epoch !== quizRunEpoch) return false;
     if (window.location.pathname === quizPath && (hasActiveQuizQuestion() || hasPendingQuizStart())) return false;
+    if (window.location.pathname === quizPath && hasNetworkCompletion(quizPath, 'quiz')) return true;
     expandAllSections();
     const item = getCourseSyllabus().find(l => l.href === quizPath);
     if (item?.completed) return true;
@@ -2584,10 +2627,31 @@ function goToNextLesson() {
 
 // ─── Watchdog Supervisor ──────────────────────────────────────────────────────
 
+let backgroundRegistration = null;
+function shouldSuperviseBackgroundRun() {
+  return backgroundRun && !quizAutoPaused &&
+    (isBulkActive || isDiscoveringPathQueue || isSolvingQuiz || isQuizWorkflowRunning ||
+      (autoplayEnabled && videoEl && !videoEl.ended));
+}
+function syncBackgroundSupervision() {
+  const enabled = !!shouldSuperviseBackgroundRun();
+  if (enabled === backgroundRegistration) return;
+  backgroundRegistration = enabled;
+  try {
+    chrome.runtime.sendMessage({action:'backgroundRunState', enabled}, response => {
+      if (chrome.runtime.lastError || response?.success === false) backgroundRegistration = null;
+    });
+  } catch (_) { backgroundRegistration = null; }
+}
+
 function startWatchdog() {
   if (watchdogInterval) clearInterval(watchdogInterval);
 
-  watchdogInterval = setInterval(() => {
+  watchdogInterval = setInterval(runPlaybackWatchdog, 500);
+}
+
+function runPlaybackWatchdog() {
+    syncBackgroundSupervision();
     if (isDiscoveringPathQueue) return;
     // Handle player surveys during ordinary autoplay as well as AutoPilot.
     if (dismissSurveyIfPresent()) return;
@@ -2671,7 +2735,6 @@ function startWatchdog() {
         videoEl.play().catch(() => {});
       }
     }
-  }, 500);
 }
 
 // ─── Video Attachment ─────────────────────────────────────────────────────────
@@ -3008,11 +3071,18 @@ async function advancePathQueue() {
 // ─── Messaging (Popup ↔ Content) ─────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'backgroundPulse') {
+    const active = !!shouldSuperviseBackgroundRun();
+    if (active) runPlaybackWatchdog();
+    sendResponse({active});
+    return true;
+  }
   if (message.action === 'startAllPaths') {
     startAllPaths().then(sendResponse).catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
   if (message.action === 'startBulkComplete') {
+    resetNetworkCompletionSignals();
     quizRunEpoch++;
     isDiscoveringPathQueue = false;
     if (message.focusMode) focusMode = message.focusMode;
@@ -3031,12 +3101,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     chrome.storage.local.set({ bulkActive: true, pathQueueActive: false, pathQueueDiscoveryActive: false, pathQueueDiscovery: null, focusMode, playbackSpeed: currentSpeed });
     addLog(`🚀 AutoPilot started (Focus Mode: ${focusMode}, Speed: ${currentSpeed}x)`, 'info');
+    syncBackgroundSupervision();
     runAutonomousStep();
     sendResponse({ success: true });
     return true;
   }
 
   if (message.action === 'stopBulkComplete') {
+    resetNetworkCompletionSignals();
     quizRunEpoch++;
     quizAutoPaused = true;
     isDiscoveringPathQueue = false;
@@ -3053,6 +3125,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     isNavigatingToLesson = false;
     syncPlaybackSettings();
     chrome.runtime.sendMessage({ action: 'updateBadge', text: '' });
+    syncBackgroundSupervision();
     addLog('⏹ AutoPilot stopped by user.', 'info');
     sendResponse({ success: true });
     return true;
@@ -3076,6 +3149,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'setBgPlay') {
     backgroundRun = !!message.enabled;
     chrome.storage.local.set({ bgPlay: backgroundRun });
+    syncBackgroundSupervision();
     syncPlaybackSettings();
     sendResponse({ success: true });
     return true;
@@ -3201,6 +3275,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   if (changes.strictCompletion) strictCompletionEnabled = changes.strictCompletion.newValue !== false;
   if (changes.bulkActive && changes.bulkActive.newValue === false) isBulkActive = false;
   if (changes.speedInjection || changes.playbackSpeed || changes.bgPlay) syncPlaybackSettings();
+  if (changes.bgPlay || changes.bulkActive || changes.autoplay) syncBackgroundSupervision();
   const providerChanged = ['groqApiKey', 'geminiApiKey', 'openRouterApiKey', 'nvidiaApiKey', 'selectedProvider'].some(key => changes[key]);
   if (providerChanged || ((changes.autoSolve || changes.autoSolveQuizzes) && autoSolveQuizzes)) {
     quizAutoPaused = false; quizError = null; quizErrorUrl = null; lastQuizCheckTime = 0;
