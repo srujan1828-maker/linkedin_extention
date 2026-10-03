@@ -19,7 +19,7 @@ function speedEngine() {
   let nativeHidden = true, nativeFocus = true;
   const document = Object.create({ get hidden() { return nativeHidden; }, get visibilityState() { return nativeHidden ? 'hidden' : 'visible'; } });
   Object.assign(document, { querySelector: () => video, querySelectorAll: () => [video], hasFocus: () => nativeFocus, addEventListener: (type, fn) => (documentListeners[type] ||= []).push(fn) });
-  const window = { postMessage: m => posts.push(m), addEventListener: (type, fn) => (listeners[type] ||= []).push(fn) };
+  const window = { location:{origin:'https://www.linkedin.com',pathname:'/learning/example/lesson'}, postMessage: m => posts.push(m), addEventListener: (type, fn) => (listeners[type] ||= []).push(fn) };
   vm.runInNewContext(source('page-inject.js'), { window, document, HTMLMediaElement: Media, console, setInterval: noop, setTimeout: fn => timers.push(fn) });
   const message = data => listeners.message.forEach(fn => fn({ source: window, data }));
   return { video, document, window, message, listeners, documentListeners, timers, posts,
@@ -400,11 +400,11 @@ test('trusted pause input or disabling background play cancels scheduled recover
     e.video.play = async () => { plays++; };
     e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: true });
     e.emitWindow('blur');
+    if (cancel === 'input') e.emitDocument('keydown', {isTrusted:true,key:' '});
     e.video.paused = true;
     e.emitDocument('pause');
-    if (cancel === 'input') e.emitDocument('keydown', {isTrusted:true});
-    else e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: false });
-    await e.timers.shift()();
+    if (cancel === 'disable') e.message({ type: 'LI_SET_BACKGROUND_PLAY', enabled: false });
+    while (e.timers.length) await e.timers.shift()();
     assert.equal(plays, 0);
   }
 });
@@ -429,7 +429,7 @@ test('foreground pauses remain paused and recovery is bounded for repeated backg
   assert.equal(plays, 2);
 });
 
-test('blocked background recovery reports the need to press Play without retry loops', async () => {
+test('blocked background recovery requests managed fallback without native retry loops', async () => {
   const e = speedEngine();
   e.setHidden(false);
   e.video.paused = false;

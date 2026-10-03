@@ -16,7 +16,7 @@
   let backgroundPlayEnabled = false;
   let automationPlaybackEnabled = true;
   const userPausedMedia = new WeakSet();
-  let lastTrustedInteraction = -Infinity;
+  let lastPauseInteraction = null;
 
   let nativeHiddenGetter = null;
   const nativeHasFocus = typeof document.hasFocus === 'function' ? document.hasFocus.bind(document) : null;
@@ -46,15 +46,16 @@
     state.pending = true;
     const playbackPath = window.location?.pathname;
     setTimeout(async () => {
-      state.pending = false;
       if (isQuizOrPathRoute() || window.location?.pathname !== playbackPath || !backgroundPlayEnabled || !automationPlaybackEnabled || userPausedMedia.has(media) || backgroundCandidates.get(media) !== state || !actuallyInBackground() ||
-          media.isConnected === false || media.ended || !media.paused) return;
+          media.isConnected === false || media.ended || !media.paused) { state.pending = false; return; }
       state.attempts++;
       try {
         await media.play();
       } catch (error) {
         backgroundCandidates.delete(media);
-        window.postMessage({ type: 'LI_BACKGROUND_PLAY_BLOCKED' }, '*');
+        window.postMessage({ type: 'LI_BACKGROUND_PLAY_BLOCKED', path: playbackPath }, window.location.origin);
+      } finally {
+        state.pending = false;
       }
     }, 150);
   }
@@ -100,18 +101,39 @@
     pageBlurred = false;
     if (!actuallyInBackground()) backgroundCandidates.clear();
   }, true);
+  function pauseInteractionMedia(event) {
+    if (!event.isTrusted) return null;
+    const target = event.target;
+    if (event.type === 'keydown') {
+      if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey ||
+          ![' ', 'Spacebar', 'k', 'K'].includes(event.key) ||
+          target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target?.tagName || '')) return null;
+      return document.querySelector('video');
+    }
+    if (target?.tagName === 'VIDEO') return target;
+    const control = target?.closest?.('button, [role="button"], .vjs-play-control');
+    if (!control) return null;
+    const label = control.getAttribute('aria-label') || control.getAttribute('title') || control.innerText || '';
+    if (!control.classList?.contains('vjs-play-control') && !/^(?:play|pause)(?:\s|$)/i.test(label.trim())) return null;
+    return control.closest?.('.video-js, .classroom-video-player, [data-test-video-player]')?.querySelector('video') ||
+      document.querySelector('video');
+  }
+
   document.addEventListener('pause', e => {
-    if (Date.now() - lastTrustedInteraction < 1000) {
+    if (lastPauseInteraction?.media === e.target && Date.now() - lastPauseInteraction.at < 1000) {
+      lastPauseInteraction = null;
       userPausedMedia.add(e.target);
+      e.target.setAttribute?.('data-li-user-paused', 'true');
       backgroundCandidates.delete(e.target);
       return;
     }
     if (backgroundPlayEnabled && actuallyInBackground()) recoverBackgroundPause(e.target);
   }, true);
-  // A real interaction can intentionally pause playback. Never undo that input.
+  // Only playback controls express pause intent; Ctrl+Tab and unrelated clicks do not.
   for (const evt of ['pointerdown', 'mousedown', 'keydown']) {
     document.addEventListener(evt, e => {
-      if (e.isTrusted) { lastTrustedInteraction = Date.now(); backgroundCandidates.clear(); }
+      const media = pauseInteractionMedia(e);
+      if (media) lastPauseInteraction = {media, at:Date.now()};
     }, true);
   }
 
@@ -119,7 +141,9 @@
   ['play', 'playing'].forEach(type => document.addEventListener(type, event => {
     const media = event.target;
     if (media?.tagName !== 'VIDEO') return;
+    lastPauseInteraction = null;
     userPausedMedia.delete(media);
+    media.removeAttribute?.('data-li-user-paused');
     if (backgroundPlayEnabled) backgroundCandidates.set(media, {attempts:0, pending:false});
   }, true));
   function prepareBackgroundMedia(media) {

@@ -82,7 +82,8 @@ function createPlaybackRecovery(storage) {
 let playbackRecovery;
 let lastRunnerErrorAt = -Infinity;
 function recoverBlockedPlayback() {
-  const active = !quizAutoPaused && (isBulkActive || autoplayEnabled) && (backgroundRun || !document.hidden);
+  const active = !quizAutoPaused && document.querySelector('video')?.getAttribute?.('data-li-user-paused') !== 'true' &&
+    (isBulkActive || autoplayEnabled) && (backgroundRun || !document.hidden);
   const main = document.querySelector('main, [role="main"]') || document.body;
   const text = main?.innerText || '';
   const errorPage = /\boops[!]?/i.test(text) && /it.s (?:not you|us)|give it another try/i.test(text);
@@ -171,7 +172,7 @@ const managedPlayback = createManagedPlayback({
 function requestManagedPlayback(video) {
   const epoch = quizRunEpoch, path = window.location.pathname;
   return managedPlayback(video, () => epoch === quizRunEpoch && path === window.location.pathname &&
-    !quizAutoPaused && !isDiscoveringPathQueue && (isBulkActive || autoplayEnabled) &&
+    !quizAutoPaused && video?.getAttribute?.('data-li-user-paused') !== 'true' && !isDiscoveringPathQueue && (isBulkActive || autoplayEnabled) &&
     (backgroundRun || !document.hidden) && !isQuizOnPage() && !isLearningPathPage() && video.isConnected !== false);
 }
 let recoveryReloadInFlight = false;
@@ -2346,7 +2347,8 @@ function findEarlierUnfinishedLesson(syllabus, path, mode = 'pending_only') {
 
 async function runAutonomousStep() {
   if (!isExtensionContextActive()) return;
-  if (isDiscoveringPathQueue || !isBulkActive || (!backgroundRun && document.hidden)) return;
+  if (isDiscoveringPathQueue || !isBulkActive || (!backgroundRun && document.hidden) ||
+      document.querySelector('video')?.getAttribute?.('data-li-user-paused') === 'true') return;
   if (isRunningAutonomousStep || isNavigatingToLesson) {
     return;
   }
@@ -2762,10 +2764,12 @@ function navigateToLesson(lesson, {allowAutoplay = false} = {}) {
 // ─── Playback Engine & Anti-Freeze ────────────────────────────────────────────
 
 window.addEventListener('message', event => {
-  if (event.source !== window || event.data?.type !== 'LI_BACKGROUND_PLAY_BLOCKED' || !backgroundRun) return;
-  const message = 'Background playback was blocked by the browser. Open the tab and press Play once.';
-  showHUD(message, 'warn');
-  sendProgress({ message });
+  if (event.source !== window || event.origin !== window.location.origin ||
+      event.data?.type !== 'LI_BACKGROUND_PLAY_BLOCKED' || !backgroundRun ||
+      event.data.path !== window.location.pathname) return;
+  // Use the shared cooldown and muted autoplay fallback instead of stopping here.
+  const video = document.querySelector('video');
+  if (video) requestManagedPlayback(video);
 });
 
 function syncPlaybackSettings() {
@@ -2921,6 +2925,7 @@ function runPlaybackWatchdog() {
     if (videoEl && videoEl !== currentVideo) videoEl = null;
     if (currentVideo && currentVideo !== videoEl) attachToVideo(currentVideo);
     if (isDiscoveringPathQueue) return;
+    if (videoEl?.getAttribute?.('data-li-user-paused') === 'true') return;
     // Bulk mode also needs speed enforcement after a player or page-world reset.
     if (isBulkActive && videoEl && !isQuizOnPage() && speedInjectionEnabled &&
         Date.now() - lastRateChangeTime > 500 && videoEl.playbackRate !== currentSpeed) applySpeed(videoEl, currentSpeed);
@@ -3007,7 +3012,7 @@ function runPlaybackWatchdog() {
       lastRecordedTime = now;
     }
 
-    if (videoEl.paused && !videoEl.ended && isBulkActive && (backgroundRun || !document.hidden)) {
+    if (videoEl.paused && !videoEl.ended && autoplayEnabled && !quizAutoPaused && (backgroundRun || !document.hidden)) {
       if (videoEl.readyState >= 2) {
         requestManagedPlayback(videoEl);
       }
@@ -3255,6 +3260,7 @@ async function startAllPaths({resumeDiscovery = false} = {}) {
   }
   if (isDiscoveringPathQueue && !resumeDiscovery) return {success:true, discovering:true, message:'Path discovery is already running.'};
   const epoch = ++quizRunEpoch;
+  document.querySelector('video')?.removeAttribute?.('data-li-user-paused');
   isDiscoveringPathQueue = true;
   isBulkActive = false;
   quizAutoPaused = false;
@@ -3389,6 +3395,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.focusMode) focusMode = message.focusMode;
     if (message.speed) currentSpeed = Math.min(16, Math.max(0.25, parseFloat(message.speed) || currentSpeed));
     isBulkActive = true;
+    document.querySelector('video')?.removeAttribute?.('data-li-user-paused');
     quizError = null; quizErrorUrl = null; quizAutoPaused = false;
     continuedQuizUrls.clear();
     rememberLearningPath();
