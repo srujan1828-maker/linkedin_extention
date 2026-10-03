@@ -750,6 +750,14 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 
+function sendBackgroundPulseWithTimeout(api, id, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('Background tab response timed out')), timeoutMs);
+    Promise.resolve().then(() => api.tabs.sendMessage(id, {action:'backgroundPulse'}))
+      .then(value => { clearTimeout(timer); resolve(value); }, error => { clearTimeout(timer); reject(error); });
+  });
+}
+
 function installBackgroundSupervisor(api) {
   if (!api.alarms || !api.storage.session || !api.tabs?.onUpdated) return;
   const key = 'learningBackgroundTabs', alarm = 'learning-background-pulse';
@@ -766,8 +774,10 @@ function installBackgroundSupervisor(api) {
   const read = async () => (await api.storage.session.get(key))[key] || {};
   const save = async rows => {
     await api.storage.session.set({[key]:rows});
-    if (Object.keys(rows).length) await api.alarms.create(alarm, {periodInMinutes:0.5});
-    else await api.alarms.clear(alarm);
+    if (Object.keys(rows).length) {
+      const existing = api.alarms.get ? await api.alarms.get(alarm) : null;
+      if (!existing) await api.alarms.create(alarm, {periodInMinutes:0.5});
+    } else await api.alarms.clear(alarm);
   };
   const release = async (rows, id) => {
     const row = rows[id];
@@ -782,7 +792,7 @@ function installBackgroundSupervisor(api) {
       try {
         const tab = await api.tabs.get(Number(id));
         if (!isLearning(tab.url)) { await release(rows, id); continue; }
-        const response = await api.tabs.sendMessage(Number(id), {action:'backgroundPulse'});
+        const response = await sendBackgroundPulseWithTimeout(api, Number(id));
         if (response?.active === false) await release(rows, id);
         else if (response?.active === true) rows[id].lastSeen = Date.now();
       } catch (_) {

@@ -3,7 +3,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'..','page-inject.js'),'utf8');
-function fixture() {
+function fixture(initialReadyState=4) {
   let hidden=true, now=10000;
   const listeners={}, windowListeners={}, timers=[];
   class Media {
@@ -13,7 +13,7 @@ function fixture() {
     addEventListener(){}
     async play(){this.calls++;this.paused=false;}
   }
-  const video=new Media();
+  const video=new Media(); video.readyState=initialReadyState;
   const document=Object.create({get hidden(){return hidden;}});
   Object.assign(document,{hasFocus:()=>!hidden,querySelectorAll:()=>[video],querySelector:()=>video,
     addEventListener:(type,fn)=>(listeners[type] ||= []).push(fn)});
@@ -48,4 +48,12 @@ test('playing resets recovery attempts across repeated background pauses',async(
     f.video.paused=false;f.emit('playing');f.video.paused=true;f.emit('pause');await f.flush();
   }
   assert.equal(f.video.calls,5);
+});
+
+test('service-worker pulse retries a ready player even if canplay was missed',async()=>{
+  const f=fixture(0);
+  await f.flush();assert.equal(f.video.calls,0);
+  f.video.readyState=4;
+  f.message({type:'LI_BACKGROUND_PULSE'});await f.flush();
+  assert.equal(f.video.calls,1);
 });

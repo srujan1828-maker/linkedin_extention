@@ -76,3 +76,9 @@ The page engine tracks play/playing events, resets recovery attempts after playb
 ### Resume after recovery reload (v10.8.11)
 
 Recovery reloads finish saving the active AutoPilot, autoplay, and background settings first. Restored runs try playback immediately when ready and on loadeddata/canplay, using serialized play attempts with a two-second cooldown. NotAllowedError retries once with muted playback; a notice explains the change and the next trusted pointer or keyboard interaction restores the original mute setting. A failed muted attempt restores the original setting and asks for a manual Play click. Stop or navigation cancels any later fallback attempt.
+
+### Background watchdog reliability (v10.8.12)
+
+Each service-worker pulse waits at most eight seconds for a tab response so an unresponsive tab cannot block all future supervision. Existing alarm schedules are preserved across page updates; missing alarms are recreated. Content registration renews once per minute. A pulse also nudges the page-world recovery handler when a readiness event was missed.
+
+During AutoPilot, paused video playback is retried before checking autonomous workflow locks, while quiz pages remain excluded. The pulse replies before running recovery so a failing watchdog does not prevent the service worker receiving its status. This does not enable execution while Chrome or the computer is asleep.

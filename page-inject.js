@@ -274,6 +274,14 @@
       return;
     }
 
+    if (event.data.type === 'LI_BACKGROUND_PULSE') {
+      if (backgroundPlayEnabled && automationPlaybackEnabled) {
+        rememberPlayingMedia();
+        document.querySelectorAll('video').forEach(prepareBackgroundMedia);
+      }
+      return;
+    }
+
     // Speed update message
     if (event.data.type === 'LI_FORCE_SPEED' || event.data.type === 'LI_SET_SPEED') {
       const speed = parseFloat(event.data.speed);
