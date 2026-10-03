@@ -334,7 +334,8 @@ function getCourseSyllabus() {
     if (!seen.has(cleanHref)) {
       seen.add(cleanHref);
       const rowContainer = a.closest('li') || a.parentElement || a;
-      const completed = isLessonCompleted(rowContainer);
+      const completed = isLessonCompleted(rowContainer) || hasNetworkCompletion(cleanHref,
+        /quiz|assessment|exam/i.test(cleanHref + ' ' + title) ? 'quiz' : 'video');
 
       const rowText = (rowContainer.innerText || '').toLowerCase();
       const hasVideoDuration = /\b\d+\s*(?:mnt|min|m|sec|dtk|s)\b|\bvideo\b/i.test(rowText);
@@ -1829,11 +1830,48 @@ async function solveLinkedInQuiz() {
 
 // ─── 🛡️ Green Tick Verification & Auto-Retry Engine ─────────────────────────
 
+const networkCompletionSignals = new Map();
+let networkSignalsSince = Date.now();
+let lastNetworkFailureLog = 0;
+function resetNetworkCompletionSignals() {
+  networkSignalsSince = Date.now();
+  networkCompletionSignals.clear();
+}
+function hasNetworkCompletion(path, kind) {
+  const signal = networkCompletionSignals.get(path);
+  return !!signal && signal.kind === kind && signal.startedAt >= networkSignalsSince &&
+    Date.now() - signal.observedAt < 120000;
+}
+window.addEventListener('message', event => {
+  if (event.source !== window || event.origin !== window.location.origin || event.data?.type !== 'LI_NETWORK_STATUS') return;
+  const signal = event.data;
+  if (!['video','quiz'].includes(signal.kind) || !['COMPLETED','IN_PROGRESS','NOT_STARTED','FAILED'].includes(signal.status) ||
+      signal.path !== window.location.pathname || !Number.isFinite(signal.startedAt) || !Number.isFinite(signal.observedAt) ||
+      signal.startedAt < networkSignalsSince || signal.observedAt < signal.startedAt ||
+      signal.observedAt > Date.now() + 1000 || Date.now() - signal.observedAt > 120000 || quizAutoPaused) return;
+  if (signal.status === 'COMPLETED') {
+    networkCompletionSignals.set(signal.path, {kind:signal.kind,startedAt:signal.startedAt,observedAt:signal.observedAt});
+    if (networkCompletionSignals.size > 50) networkCompletionSignals.delete(networkCompletionSignals.keys().next().value);
+    setTimeout(() => {
+      if (quizAutoPaused || isDiscoveringPathQueue || window.location.pathname !== signal.path) return;
+      if (isBulkActive) runAutonomousStep();
+      else checkAndAutoSolveQuiz();
+    }, 150);
+  } else {
+    networkCompletionSignals.delete(signal.path);
+    if (signal.status === 'FAILED' && Date.now() - lastNetworkFailureLog > 30000) {
+      lastNetworkFailureLog = Date.now();
+      addLog('LinkedIn did not accept a progress update. Waiting for verified completion; the request was not replayed.', 'warn');
+    }
+  }
+});
+
 async function verifyQuizGreenTick(maxWaitMs = 5000, quizPath = window.location.pathname, epoch = quizRunEpoch) {
   const start = Date.now();
   while (Date.now() - start < maxWaitMs) {
     if (epoch !== quizRunEpoch) return false;
     if (window.location.pathname === quizPath && (hasActiveQuizQuestion() || hasPendingQuizStart())) return false;
+    if (window.location.pathname === quizPath && hasNetworkCompletion(quizPath, 'quiz')) return true;
     expandAllSections();
     const item = getCourseSyllabus().find(l => l.href === quizPath);
     if (item?.completed) return true;
@@ -3044,6 +3082,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message.action === 'startBulkComplete') {
+    resetNetworkCompletionSignals();
     quizRunEpoch++;
     isDiscoveringPathQueue = false;
     if (message.focusMode) focusMode = message.focusMode;
@@ -3069,6 +3108,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === 'stopBulkComplete') {
+    resetNetworkCompletionSignals();
     quizRunEpoch++;
     quizAutoPaused = true;
     isDiscoveringPathQueue = false;
