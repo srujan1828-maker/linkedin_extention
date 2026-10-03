@@ -2741,6 +2741,7 @@ function goToNextLesson() {
 // ─── Watchdog Supervisor ──────────────────────────────────────────────────────
 
 let backgroundRegistration = null;
+let backgroundRegisteredAt = -Infinity;
 let lastAutomationPlaybackState = null;
 function syncAutomationPlaybackState() {
   const enabled = !quizAutoPaused && (isBulkActive || autoplayEnabled);
@@ -2756,8 +2757,9 @@ function shouldSuperviseBackgroundRun() {
 function syncBackgroundSupervision() {
   syncAutomationPlaybackState();
   const enabled = !!shouldSuperviseBackgroundRun();
-  if (enabled === backgroundRegistration) return;
+  if (enabled === backgroundRegistration && (!enabled || Date.now() - backgroundRegisteredAt < 60000)) return;
   backgroundRegistration = enabled;
+  backgroundRegisteredAt = Date.now();
   try {
     chrome.runtime.sendMessage({action:'backgroundRunState', enabled}, response => {
       if (chrome.runtime.lastError || response?.success === false) backgroundRegistration = null;
@@ -2778,6 +2780,8 @@ function runPlaybackWatchdog() {
     if (videoEl && videoEl !== currentVideo) videoEl = null;
     if (currentVideo && currentVideo !== videoEl) attachToVideo(currentVideo);
     if (isDiscoveringPathQueue) return;
+    // Playback recovery must continue even while a navigation/quiz step awaits a response.
+    if (isBulkActive && videoEl && !isQuizOnPage() && videoEl.paused && !videoEl.ended) requestManagedPlayback(videoEl);
     // Handle player surveys during ordinary autoplay as well as AutoPilot.
     if (dismissSurveyIfPresent()) return;
 
@@ -3203,8 +3207,13 @@ async function advancePathQueue() {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'backgroundPulse') {
     const active = !!shouldSuperviseBackgroundRun();
-    if (active) runPlaybackWatchdog();
+    // Reply immediately: a stalled recovery action must not block supervision.
     sendResponse({active});
+    if (active) {
+      window.postMessage({type:'LI_BACKGROUND_PULSE'}, window.location.origin);
+      try { runPlaybackWatchdog(); }
+      catch (error) { addLog('Background watchdog failed: ' + error.message, 'warn'); }
+    }
     return true;
   }
   if (message.action === 'startAllPaths') {
