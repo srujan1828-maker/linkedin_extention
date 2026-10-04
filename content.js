@@ -650,10 +650,11 @@ function isGlobalNavPage() {
  * Strict verification: Must explicitly state "Completed" (e.g. "Completed 6/4/2026")
  * or have an explicit checkmark badge. Does NOT treat unfinished progress bars as completed.
  */
-function isPathItemCompleted(card) {
+function isPathItemCompleted(card, type = 'course') {
   if (!card) return false;
   const text = (card.innerText || '').trim();
   if (/\b(?:not completed|incomplete|remaining)\b/i.test(text)) return false;
+  if (type === 'external' && /(?:^|\n)\s*visited\s+\d+[/-]\d+[/-]\d+\s*(?:\n|$)/i.test(text)) return true;
   // Use LinkedIn's status on the whole card; progress colors and 100% alone are insufficient.
   return /(?:^|\n)\s*(?:completed|selesai|completado|terminé|abgeschlossen)(?:\s+\d+[/-]\d+[/-]\d+)?\s*(?:\n|$)/i.test(text);
 }
@@ -668,19 +669,91 @@ function getLearningPathItems() {
   ));
   const seen = new Set();
   return cards.flatMap(card => {
-    const link = card.querySelector('h3 a[href*="/learning/"], h4 a[href*="/learning/"]');
+    const link = card.querySelector('h3 a[href], h4 a[href]');
     if (!link) return [];
     let url;
     try { url = new URL(link.getAttribute('href') || link.href, window.location.href); } catch (e) { return []; }
-    if (url.origin !== window.location.origin || !/^\/learning\/[^/]+/.test(url.pathname)) return [];
+    if (url.origin !== window.location.origin || !/^\/(?:learning|learning-career-hub|career-hub)\/[^/]+/.test(url.pathname)) return [];
     if (/^\/learning\/(paths|topics|instructors|search|me)\//.test(url.pathname)) return [];
     if (seen.has(url.pathname)) return [];
     seen.add(url.pathname);
     const header = card.querySelector('.lls-card-detail-card-body__header');
-    const type = url.searchParams.get('standalone') === 'true' || /(?:^|\n)Video(?:\n|$)/i.test(header?.innerText || '') ? 'video' : 'course';
+    const typeText = header?.innerText || card.innerText || '';
+    const type = /(?:^|\n)\s*(?:link|article|document)\s*(?:\n|$)/i.test(typeText) ? 'external' :
+      url.searchParams.get('standalone') === 'true' || /(?:^|\n)Video(?:\n|$)/i.test(typeText) ? 'video' : 'course';
     return [{ element: link, card, href: url.pathname, fullHref: url.href,
-      title: (link.textContent || link.innerText || '').trim(), completed: isPathItemCompleted(card), type }];
+      title: (link.textContent || link.innerText || '').trim(), completed: isPathItemCompleted(card, type), type }];
   });
+}
+
+// External path items have no player or course TOC. Follow their own completion UI.
+function getExternalPathItemState() {
+  if (!/^\/(?:learning|learning-career-hub|career-hub)\//.test(window.location.pathname) ||
+      isLearningPathPage() || isQuizOnPage() || document.querySelector('video')) return null;
+  const root = document.body || document.querySelector('main, [role="main"]');
+  if (!root) return null;
+  const controls = Array.from(root.querySelectorAll('button, a, [role="button"]'));
+  const label = el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+  const open = controls.find(el => /^open link$/i.test(label(el)) && isElementClickable(el));
+  const back = controls.find(el => /\bback to learning path\b/i.test(label(el)));
+  if (!open || !back) return null;
+  const dialog = Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal')).find(el =>
+    isElementClickable(el) && /^mark as complete$/i.test((el.querySelector('h2, h3, [role="heading"]')?.innerText || '').trim()) &&
+    /have you completed this (?:article|content|document|link)\?/i.test(el.innerText || ''));
+  const confirm = dialog && Array.from(dialog.querySelectorAll('button, [role="button"]')).find(el =>
+    /^mark as complete$/i.test(label(el)) && isElementClickable(el));
+  const mark = controls.find(el => /^mark as complete$/i.test(label(el)) && isElementClickable(el));
+  const completed = !dialog && Array.from(root.querySelectorAll('p, span, div, [role="status"]')).some(el =>
+    /^completed\s+\d+[/-]\d+[/-]\d+$/i.test((el.innerText || el.textContent || '').trim()));
+  if (!mark && !dialog && !completed) return null;
+  const next = controls.find(el => /^next in this learning path\s*[→➜]?$/i.test(label(el)) && isElementClickable(el));
+  return {confirm, completed, next};
+}
+
+let externalPathWork = {path:'', epoch:-1, confirmed:new WeakSet(), inFlight:false, confirmAttempts:0, nextAttempts:0, nextAttempt:0, notice:''};
+function handleExternalPathItem() {
+  const item = getExternalPathItemState();
+  if (!item) return false;
+  if (nonVideoTimer) { clearTimeout(nonVideoTimer); nonVideoTimer = null; }
+  if (quizAutoPaused || isDiscoveringPathQueue || !(isBulkActive || autoplayEnabled) ||
+      !autoNavigateEnabled || (!backgroundRun && document.hidden)) return true;
+  const path = window.location.pathname, epoch = quizRunEpoch;
+  if (externalPathWork.path !== path || externalPathWork.epoch !== epoch) {
+    externalPathWork = {path, epoch, confirmed:new WeakSet(), inFlight:false, confirmAttempts:0, nextAttempts:0, nextAttempt:0, notice:''};
+  }
+  const work = externalPathWork;
+  const active = () => path === window.location.pathname && epoch === quizRunEpoch && !quizAutoPaused &&
+    !isDiscoveringPathQueue && autoNavigateEnabled && (isBulkActive || autoplayEnabled) && (backgroundRun || !document.hidden);
+  // This dialog follows the user's Mark as complete action. Do not mark unopened material.
+  if (item.confirm && work.confirmAttempts < 3 && !work.confirmed.has(item.confirm)) {
+    work.confirmAttempts++;
+    work.confirmed.add(item.confirm);
+    clickElement(item.confirm);
+  }
+  if (!item.completed) {
+    const message = item.confirm ? 'Waiting for LinkedIn to confirm article completion...' :
+      'External reading item: open the link, then use Mark as complete when finished. AutoPilot will continue.';
+    if (message !== work.notice) { work.notice = message; showHUD(message, 'info'); sendProgress({message, isRunning:isBulkActive}); }
+    return true;
+  }
+  if (work.inFlight || Date.now() < work.nextAttempt) return true;
+  work.inFlight = true; work.nextAttempt = Date.now() + 5000;
+  void (async () => {
+    try {
+      if (await returnToLearningPath({allowAutoplay:true}) || !active()) return;
+      // A path's Next control is the fallback when no path URL was saved.
+      if (item.next?.isConnected !== false && item.next && active() && work.nextAttempts < 3) {
+        work.nextAttempts++; clickElement(item.next);
+      }
+      else if (active() && work.notice !== 'completed') {
+        work.notice = 'completed'; work.nextAttempt = Infinity;
+        showHUD('Article completed. Open the learning path to continue; no path destination is available.', 'info');
+      }
+    } catch (error) {
+      if (active()) addLog('External item navigation: ' + error.message, 'warn');
+    } finally { work.inFlight = false; }
+  })();
+  return true;
 }
 
 function findBackToLearningPathButton() {
@@ -758,7 +831,7 @@ async function handleLearningPathStep() {
   log(`Learning Path: ${completedCount}/${totalCount} items completed (${pendingCount} pending)`);
 
   sendProgress({
-    message: `📚 Learning Path: ${completedCount}/${totalCount} courses completed`,
+    message: `📚 Learning Path: ${completedCount}/${totalCount} items completed`,
     percent,
     current: completedCount,
     total: totalCount,
@@ -803,7 +876,7 @@ async function handleLearningPathStep() {
     return;
   }
 
-  log(`Learning Path: Opening next uncompleted course: "${nextItem.title}" → ${nextItem.fullHref}`);
+  log(`Learning Path: Opening next uncompleted item: "${nextItem.title}" → ${nextItem.fullHref}`);
   showHUD(`📚 Opening: ${nextItem.title} (${completedCount + 1}/${totalCount})`, 'info');
   await addLog(`📚 Opening course: ${nextItem.title} (${completedCount + 1}/${totalCount})`, 'info');
 
@@ -2362,6 +2435,7 @@ async function runAutonomousStep() {
   try {
     startAudioKeepalive();
     rememberLearningPath();
+    if (handleExternalPathItem()) return;
     if (isStandalonePathVideo()) {
       await runStandalonePathVideo();
       return;
@@ -2920,6 +2994,7 @@ function runPlaybackWatchdog() {
     if (!isExtensionContextActive()) return;
     recoverPendingLessonNavigation();
     syncBackgroundSupervision();
+    if (handleExternalPathItem()) return;
     if (recoverBlockedPlayback()) return;
     const currentVideo = document.querySelector('video');
     if (videoEl && videoEl !== currentVideo) videoEl = null;
@@ -2971,7 +3046,7 @@ function runPlaybackWatchdog() {
             nonVideoTimer = setTimeout(() => {
               nonVideoTimer = null;
               if (skipEpoch === quizRunEpoch && skipPath === window.location.pathname && !quizAutoPaused &&
-                  skipNonVideos && autoplayEnabled && autoNavigateEnabled && !isQuizOnPage() &&
+                  skipNonVideos && autoplayEnabled && autoNavigateEnabled && !isQuizOnPage() && !getExternalPathItemState() &&
                   !document.querySelector('video') && !getCourseSyllabus().some(item => item.href === skipPath && item.isVideo)) {
                 goToNextLesson();
               }

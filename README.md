@@ -1,6 +1,6 @@
 # LinkedIn Learning AI AutoPilot
 
-A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.16**.
+A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.17**.
 
 ## Installation
 
@@ -104,3 +104,7 @@ GitHub Actions checks JavaScript syntax and runs the complete Node regression su
 Answer text matching normalizes smart quotes and nonbreaking whitespace while preserving mathematical operators and negation. JSON responses normalize numeric string indices (still zero-based) and explicit scalar/snake-case answer fields.
 
 If an identifiable selection has a mismatched text format, the extension requests at most one format-only repair. The repair must retain the original selected indices. Conflicting indices/text, out-of-range indices, ambiguous or partial text-only answers, and explicit empty/error responses are rejected. Stop or route changes cancel the repair; the solver still rechecks the live question and options before submitting.
+
+### External reading items
+
+Link/article/document items use their own completion UI instead of a video player. Open the material and use Mark as complete when finished. AutoPilot handles the resulting confirmation dialog, waits for LinkedIn’s Completed status, and returns to the path to continue. Link cards showing LinkedIn’s dated Visited status are recognized without revisiting them; this does not count as completion for video or course cards.

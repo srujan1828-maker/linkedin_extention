@@ -8,7 +8,7 @@ function watchdog({enabled=true,bg=true,manual=false,stopped=false,quiz=false}={
  const video={paused:true,ended:false,readyState:4,currentTime:0,getAttribute:()=>manual?'true':null};
  const globals={
  isExtensionContextActive:()=>true,recoverPendingLessonNavigation:()=>{},syncBackgroundSupervision:()=>{},
- recoverBlockedPlayback:()=>false,document:{hidden:true,querySelector:()=>video},videoEl:video,
+ handleExternalPathItem:()=>false,recoverBlockedPlayback:()=>false,document:{hidden:true,querySelector:()=>video},videoEl:video,
  attachToVideo:()=>{},isDiscoveringPathQueue:false,isBulkActive:false,isQuizOnPage:()=>quiz,
  dismissSurveyIfPresent:()=>false,checkAndAutoSolveQuiz:()=>{},nonVideoTimer:null,
  speedInjectionEnabled:false,currentSpeed:16,lastRecordedTime:0,stuckCount:0,
