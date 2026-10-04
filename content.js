@@ -689,7 +689,9 @@ function getLearningPathItems() {
 // External path items have no player or course TOC. Follow their own completion UI.
 function getExternalPathItemState() {
   if (!/^\/(?:learning|learning-career-hub|career-hub)\//.test(window.location.pathname) ||
-      isLearningPathPage() || isQuizOnPage() || document.querySelector('video')) return null;
+      isLearningPathPage() || /\/(?:quiz|assessment|exam|exams|skill-assessment)(?:\/|$)/i.test(window.location.pathname) ||
+      document.querySelector('video') || document.querySelector(
+        '.chapter-quiz, .chapter-quiz-question, .quiz-challenge, .classroom-quiz, .quiz-challenge__counter, [class*="question-counter"], .quiz-step-counter')) return null;
   const root = document.body || document.querySelector('main, [role="main"]');
   if (!root) return null;
   const controls = Array.from(root.querySelectorAll('button, a, [role="button"]'));
@@ -707,10 +709,10 @@ function getExternalPathItemState() {
     /^completed\s+\d+[/-]\d+[/-]\d+$/i.test((el.innerText || el.textContent || '').trim()));
   if (!mark && !dialog && !completed) return null;
   const next = controls.find(el => /^next in this learning path\s*[→➜]?$/i.test(label(el)) && isElementClickable(el));
-  return {confirm, completed, next};
+  return {mark:dialog ? null : mark, confirm, completed, next};
 }
 
-let externalPathWork = {path:'', epoch:-1, confirmed:new WeakSet(), inFlight:false, confirmAttempts:0, nextAttempts:0, nextAttempt:0, notice:''};
+let externalPathWork = {path:'', epoch:-1, confirmed:new WeakSet(), inFlight:false, confirmAttempts:0, markAttempts:0, nextMarkAttempt:0, nextAttempts:0, nextAttempt:0, notice:''};
 function handleExternalPathItem() {
   const item = getExternalPathItemState();
   if (!item) return false;
@@ -719,20 +721,27 @@ function handleExternalPathItem() {
       !autoNavigateEnabled || (!backgroundRun && document.hidden)) return true;
   const path = window.location.pathname, epoch = quizRunEpoch;
   if (externalPathWork.path !== path || externalPathWork.epoch !== epoch) {
-    externalPathWork = {path, epoch, confirmed:new WeakSet(), inFlight:false, confirmAttempts:0, nextAttempts:0, nextAttempt:0, notice:''};
+    externalPathWork = {path, epoch, confirmed:new WeakSet(), inFlight:false, confirmAttempts:0, markAttempts:0, nextMarkAttempt:0, nextAttempts:0, nextAttempt:0, notice:''};
   }
   const work = externalPathWork;
   const active = () => path === window.location.pathname && epoch === quizRunEpoch && !quizAutoPaused &&
     !isDiscoveringPathQueue && autoNavigateEnabled && (isBulkActive || autoplayEnabled) && (backgroundRun || !document.hidden);
-  // This dialog follows the user's Mark as complete action. Do not mark unopened material.
+  // AutoPilot drives both UI steps; progress is accepted only after LinkedIn records it.
+  const autoMark = isBulkActive && skipNonVideos && !['videos_only', 'quizzes_only'].includes(focusMode);
   if (item.confirm && work.confirmAttempts < 3 && !work.confirmed.has(item.confirm)) {
     work.confirmAttempts++;
     work.confirmed.add(item.confirm);
     clickElement(item.confirm);
+  } else if (!item.completed && !item.confirm && item.mark && autoMark &&
+      work.markAttempts < 3 && Date.now() >= work.nextMarkAttempt) {
+    work.markAttempts++; work.nextMarkAttempt = Date.now() + 3000;
+    clickElement(item.mark);
   }
   if (!item.completed) {
     const message = item.confirm ? 'Waiting for LinkedIn to confirm article completion...' :
-      'External reading item: open the link, then use Mark as complete when finished. AutoPilot will continue.';
+      autoMark ? (work.markAttempts >= 3 ? 'Article completion button did not respond. Complete it manually to continue.' :
+        'Opening Mark as complete. Waiting for the article confirmation dialog...') :
+        'External reading item: use Mark as complete when finished. AutoPilot will continue.';
     if (message !== work.notice) { work.notice = message; showHUD(message, 'info'); sendProgress({message, isRunning:isBulkActive}); }
     return true;
   }
@@ -2364,7 +2373,7 @@ function checkAndAutoSolveQuiz() {
   const currentCleanUrl = window.location.href.split('?')[0].split('#')[0];
   if (quizErrorUrl && quizErrorUrl !== currentCleanUrl) { quizError = null; quizErrorUrl = null; }
   if (isDiscoveringPathQueue || isBulkActive || isSolvingQuiz || isQuizWorkflowRunning || quizAutoPaused || !autoSolveQuizzes || quizError) return;
-  if (!isQuizOnPage()) return;
+  if (getExternalPathItemState() || !isQuizOnPage()) return;
   const active = hasActiveQuizQuestion() || hasPendingQuizStart();
   if (!active && solvedQuizUrls.has(currentCleanUrl)) { continueAfterQuiz(window.location.pathname); return; }
   const now = Date.now();
@@ -2379,7 +2388,7 @@ function checkAndAutoSolveQuiz() {
     quizAutoTriggerTimer = null;
     const url = window.location.href.split('?')[0].split('#')[0];
     if (epoch !== quizRunEpoch || url !== currentCleanUrl || isBulkActive || isSolvingQuiz ||
-        isQuizWorkflowRunning || quizAutoPaused || quizError || !autoSolveQuizzes || !isQuizOnPage()) return;
+        isQuizWorkflowRunning || quizAutoPaused || quizError || !autoSolveQuizzes || getExternalPathItemState() || !isQuizOnPage()) return;
     solveLinkedInQuizWithGreenTickRetry().then(ok => {
       if (ok) solvedQuizUrls.add(currentCleanUrl);
     });

@@ -1,6 +1,6 @@
 # LinkedIn Learning AI AutoPilot
 
-A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.17**.
+A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.18**.
 
 ## Installation
 
@@ -107,4 +107,4 @@ If an identifiable selection has a mismatched text format, the extension request
 
 ### External reading items
 
-Link/article/document items use their own completion UI instead of a video player. Open the material and use Mark as complete when finished. AutoPilot handles the resulting confirmation dialog, waits for LinkedIn’s Completed status, and returns to the path to continue. Link cards showing LinkedIn’s dated Visited status are recognized without revisiting them; this does not count as completion for video or course cards.
+Link/article/document items use their own completion UI instead of a video player. With AutoPilot running in all/pending mode and non-video handling enabled, the extension clicks Mark as complete, confirms the article dialog, waits for LinkedIn’s Completed status, and returns to the path to continue. Outside AutoPilot, the initial completion button remains manual. The initial button has a three-attempt limit with a three-second cooldown. Link cards showing LinkedIn’s dated Visited status are recognized without revisiting them; this does not count as completion for video or course cards.
