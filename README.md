@@ -1,6 +1,6 @@
 # LinkedIn Learning AI AutoPilot
 
-A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.8**.
+A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson navigation, and optional AI assistance. Version **10.8.18**.
 
 ## Installation
 
@@ -12,7 +12,7 @@ A Manifest V3 browser extension for LinkedIn Learning playback controls, lesson 
 ## Controls
 
 - **Speed injection:** apply a saved playback speed, bounded to 0.25–16×. Disabling it resets the rate to 1× and returns control to the native player. Actual support and audible sound at extreme speeds depend on the browser.
-- **Background play:** enable visibility and focus handling for background playback. If a playing video is paused during a tab switch, a bounded recovery attempts to resume it even outside AutoPilot. Enabling the toggle does not start a paused video, and trusted keyboard/mouse interactions cancel recovery. Disabling it restores native visibility reporting. If Chrome blocks playback, the extension asks you to return to the tab and press Play once. Browser suspension, autoplay restrictions, and OS power saving can still pause a tab.
+- **Background play:** supervise playback after tab switches, including ordinary autoplay and replacement players. Ctrl+Tab and unrelated page clicks do not cancel recovery. Actual playback controls and Space/K pause intentionally; press Play or restart AutoPilot to continue. Browser autoplay rejection uses a muted retry and reports if playback still cannot start. Stop cancels automatic playback. Chrome must remain open and the computer awake; a suspended browser or sleeping computer cannot keep playing.
 - **Auto-navigation:** allow automatic movement between lessons. Turning it off prevents automatic lesson navigation; manual next-lesson controls remain available.
 - **AutoPilot:** start the bulk course workflow in the selected focus mode. Stop cancels pending lesson navigation and clears the saved bulk state. Changing speed alone preserves pause, mute, and pitch preferences. Player surveys are skipped during AutoPilot and ordinary autoplay when auto-navigation and non-video skipping are enabled. Stop pauses automatic survey skipping until automation is restarted. The extension clicks Skip survey without choosing a rating; generic Close/Skip controls are used only inside a matching survey context.
 - **AI providers:** optionally configure Gemini, Groq, OpenRouter, or NVIDIA credentials in the popup. Identical in-flight prompts share a request; different prompts receive independent responses.
@@ -104,3 +104,7 @@ GitHub Actions checks JavaScript syntax and runs the complete Node regression su
 Answer text matching normalizes smart quotes and nonbreaking whitespace while preserving mathematical operators and negation. JSON responses normalize numeric string indices (still zero-based) and explicit scalar/snake-case answer fields.
 
 If an identifiable selection has a mismatched text format, the extension requests at most one format-only repair. The repair must retain the original selected indices. Conflicting indices/text, out-of-range indices, ambiguous or partial text-only answers, and explicit empty/error responses are rejected. Stop or route changes cancel the repair; the solver still rechecks the live question and options before submitting.
+
+### External reading items
+
+Link/article/document items use their own completion UI instead of a video player. With AutoPilot running in all/pending mode and non-video handling enabled, the extension clicks Mark as complete, confirms the article dialog, waits for LinkedIn’s Completed status, and returns to the path to continue. Outside AutoPilot, the initial completion button remains manual. The initial button has a three-attempt limit with a three-second cooldown. Link cards showing LinkedIn’s dated Visited status are recognized without revisiting them; this does not count as completion for video or course cards.

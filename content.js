@@ -82,7 +82,8 @@ function createPlaybackRecovery(storage) {
 let playbackRecovery;
 let lastRunnerErrorAt = -Infinity;
 function recoverBlockedPlayback() {
-  const active = !quizAutoPaused && (isBulkActive || autoplayEnabled) && (backgroundRun || !document.hidden);
+  const active = !quizAutoPaused && document.querySelector('video')?.getAttribute?.('data-li-user-paused') !== 'true' &&
+    (isBulkActive || autoplayEnabled) && (backgroundRun || !document.hidden);
   const main = document.querySelector('main, [role="main"]') || document.body;
   const text = main?.innerText || '';
   const errorPage = /\boops[!]?/i.test(text) && /it.s (?:not you|us)|give it another try/i.test(text);
@@ -171,7 +172,7 @@ const managedPlayback = createManagedPlayback({
 function requestManagedPlayback(video) {
   const epoch = quizRunEpoch, path = window.location.pathname;
   return managedPlayback(video, () => epoch === quizRunEpoch && path === window.location.pathname &&
-    !quizAutoPaused && !isDiscoveringPathQueue && (isBulkActive || autoplayEnabled) &&
+    !quizAutoPaused && video?.getAttribute?.('data-li-user-paused') !== 'true' && !isDiscoveringPathQueue && (isBulkActive || autoplayEnabled) &&
     (backgroundRun || !document.hidden) && !isQuizOnPage() && !isLearningPathPage() && video.isConnected !== false);
 }
 let recoveryReloadInFlight = false;
@@ -649,10 +650,11 @@ function isGlobalNavPage() {
  * Strict verification: Must explicitly state "Completed" (e.g. "Completed 6/4/2026")
  * or have an explicit checkmark badge. Does NOT treat unfinished progress bars as completed.
  */
-function isPathItemCompleted(card) {
+function isPathItemCompleted(card, type = 'course') {
   if (!card) return false;
   const text = (card.innerText || '').trim();
   if (/\b(?:not completed|incomplete|remaining)\b/i.test(text)) return false;
+  if (type === 'external' && /(?:^|\n)\s*visited\s+\d+[/-]\d+[/-]\d+\s*(?:\n|$)/i.test(text)) return true;
   // Use LinkedIn's status on the whole card; progress colors and 100% alone are insufficient.
   return /(?:^|\n)\s*(?:completed|selesai|completado|terminé|abgeschlossen)(?:\s+\d+[/-]\d+[/-]\d+)?\s*(?:\n|$)/i.test(text);
 }
@@ -667,19 +669,100 @@ function getLearningPathItems() {
   ));
   const seen = new Set();
   return cards.flatMap(card => {
-    const link = card.querySelector('h3 a[href*="/learning/"], h4 a[href*="/learning/"]');
+    const link = card.querySelector('h3 a[href], h4 a[href]');
     if (!link) return [];
     let url;
     try { url = new URL(link.getAttribute('href') || link.href, window.location.href); } catch (e) { return []; }
-    if (url.origin !== window.location.origin || !/^\/learning\/[^/]+/.test(url.pathname)) return [];
+    if (url.origin !== window.location.origin || !/^\/(?:learning|learning-career-hub|career-hub)\/[^/]+/.test(url.pathname)) return [];
     if (/^\/learning\/(paths|topics|instructors|search|me)\//.test(url.pathname)) return [];
     if (seen.has(url.pathname)) return [];
     seen.add(url.pathname);
     const header = card.querySelector('.lls-card-detail-card-body__header');
-    const type = url.searchParams.get('standalone') === 'true' || /(?:^|\n)Video(?:\n|$)/i.test(header?.innerText || '') ? 'video' : 'course';
+    const typeText = header?.innerText || card.innerText || '';
+    const type = /(?:^|\n)\s*(?:link|article|document)\s*(?:\n|$)/i.test(typeText) ? 'external' :
+      url.searchParams.get('standalone') === 'true' || /(?:^|\n)Video(?:\n|$)/i.test(typeText) ? 'video' : 'course';
     return [{ element: link, card, href: url.pathname, fullHref: url.href,
-      title: (link.textContent || link.innerText || '').trim(), completed: isPathItemCompleted(card), type }];
+      title: (link.textContent || link.innerText || '').trim(), completed: isPathItemCompleted(card, type), type }];
   });
+}
+
+// External path items have no player or course TOC. Follow their own completion UI.
+function getExternalPathItemState() {
+  if (!/^\/(?:learning|learning-career-hub|career-hub)\//.test(window.location.pathname) ||
+      isLearningPathPage() || /\/(?:quiz|assessment|exam|exams|skill-assessment)(?:\/|$)/i.test(window.location.pathname) ||
+      document.querySelector('video') || document.querySelector(
+        '.chapter-quiz, .chapter-quiz-question, .quiz-challenge, .classroom-quiz, .quiz-challenge__counter, [class*="question-counter"], .quiz-step-counter')) return null;
+  const root = document.body || document.querySelector('main, [role="main"]');
+  if (!root) return null;
+  const controls = Array.from(root.querySelectorAll('button, a, [role="button"]'));
+  const label = el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim();
+  const open = controls.find(el => /^open link$/i.test(label(el)) && isElementClickable(el));
+  const back = controls.find(el => /\bback to learning path\b/i.test(label(el)));
+  if (!open || !back) return null;
+  const dialog = Array.from(document.querySelectorAll('[role="dialog"], .artdeco-modal')).find(el =>
+    isElementClickable(el) && /^mark as complete$/i.test((el.querySelector('h2, h3, [role="heading"]')?.innerText || '').trim()) &&
+    /have you completed this (?:article|content|document|link)\?/i.test(el.innerText || ''));
+  const confirm = dialog && Array.from(dialog.querySelectorAll('button, [role="button"]')).find(el =>
+    /^mark as complete$/i.test(label(el)) && isElementClickable(el));
+  const mark = controls.find(el => /^mark as complete$/i.test(label(el)) && isElementClickable(el));
+  const completed = !dialog && Array.from(root.querySelectorAll('p, span, div, [role="status"]')).some(el =>
+    /^completed\s+\d+[/-]\d+[/-]\d+$/i.test((el.innerText || el.textContent || '').trim()));
+  if (!mark && !dialog && !completed) return null;
+  const next = controls.find(el => /^next in this learning path\s*[→➜]?$/i.test(label(el)) && isElementClickable(el));
+  return {mark:dialog ? null : mark, confirm, completed, next};
+}
+
+let externalPathWork = {path:'', epoch:-1, confirmed:new WeakSet(), inFlight:false, confirmAttempts:0, markAttempts:0, nextMarkAttempt:0, nextAttempts:0, nextAttempt:0, notice:''};
+function handleExternalPathItem() {
+  const item = getExternalPathItemState();
+  if (!item) return false;
+  if (nonVideoTimer) { clearTimeout(nonVideoTimer); nonVideoTimer = null; }
+  if (quizAutoPaused || isDiscoveringPathQueue || !(isBulkActive || autoplayEnabled) ||
+      !autoNavigateEnabled || (!backgroundRun && document.hidden)) return true;
+  const path = window.location.pathname, epoch = quizRunEpoch;
+  if (externalPathWork.path !== path || externalPathWork.epoch !== epoch) {
+    externalPathWork = {path, epoch, confirmed:new WeakSet(), inFlight:false, confirmAttempts:0, markAttempts:0, nextMarkAttempt:0, nextAttempts:0, nextAttempt:0, notice:''};
+  }
+  const work = externalPathWork;
+  const active = () => path === window.location.pathname && epoch === quizRunEpoch && !quizAutoPaused &&
+    !isDiscoveringPathQueue && autoNavigateEnabled && (isBulkActive || autoplayEnabled) && (backgroundRun || !document.hidden);
+  // AutoPilot drives both UI steps; progress is accepted only after LinkedIn records it.
+  const autoMark = isBulkActive && skipNonVideos && !['videos_only', 'quizzes_only'].includes(focusMode);
+  if (item.confirm && work.confirmAttempts < 3 && !work.confirmed.has(item.confirm)) {
+    work.confirmAttempts++;
+    work.confirmed.add(item.confirm);
+    clickElement(item.confirm);
+  } else if (!item.completed && !item.confirm && item.mark && autoMark &&
+      work.markAttempts < 3 && Date.now() >= work.nextMarkAttempt) {
+    work.markAttempts++; work.nextMarkAttempt = Date.now() + 3000;
+    clickElement(item.mark);
+  }
+  if (!item.completed) {
+    const message = item.confirm ? 'Waiting for LinkedIn to confirm article completion...' :
+      autoMark ? (work.markAttempts >= 3 ? 'Article completion button did not respond. Complete it manually to continue.' :
+        'Opening Mark as complete. Waiting for the article confirmation dialog...') :
+        'External reading item: use Mark as complete when finished. AutoPilot will continue.';
+    if (message !== work.notice) { work.notice = message; showHUD(message, 'info'); sendProgress({message, isRunning:isBulkActive}); }
+    return true;
+  }
+  if (work.inFlight || Date.now() < work.nextAttempt) return true;
+  work.inFlight = true; work.nextAttempt = Date.now() + 5000;
+  void (async () => {
+    try {
+      if (await returnToLearningPath({allowAutoplay:true}) || !active()) return;
+      // A path's Next control is the fallback when no path URL was saved.
+      if (item.next?.isConnected !== false && item.next && active() && work.nextAttempts < 3) {
+        work.nextAttempts++; clickElement(item.next);
+      }
+      else if (active() && work.notice !== 'completed') {
+        work.notice = 'completed'; work.nextAttempt = Infinity;
+        showHUD('Article completed. Open the learning path to continue; no path destination is available.', 'info');
+      }
+    } catch (error) {
+      if (active()) addLog('External item navigation: ' + error.message, 'warn');
+    } finally { work.inFlight = false; }
+  })();
+  return true;
 }
 
 function findBackToLearningPathButton() {
@@ -757,7 +840,7 @@ async function handleLearningPathStep() {
   log(`Learning Path: ${completedCount}/${totalCount} items completed (${pendingCount} pending)`);
 
   sendProgress({
-    message: `📚 Learning Path: ${completedCount}/${totalCount} courses completed`,
+    message: `📚 Learning Path: ${completedCount}/${totalCount} items completed`,
     percent,
     current: completedCount,
     total: totalCount,
@@ -802,7 +885,7 @@ async function handleLearningPathStep() {
     return;
   }
 
-  log(`Learning Path: Opening next uncompleted course: "${nextItem.title}" → ${nextItem.fullHref}`);
+  log(`Learning Path: Opening next uncompleted item: "${nextItem.title}" → ${nextItem.fullHref}`);
   showHUD(`📚 Opening: ${nextItem.title} (${completedCount + 1}/${totalCount})`, 'info');
   await addLog(`📚 Opening course: ${nextItem.title} (${completedCount + 1}/${totalCount})`, 'info');
 
@@ -2290,7 +2373,7 @@ function checkAndAutoSolveQuiz() {
   const currentCleanUrl = window.location.href.split('?')[0].split('#')[0];
   if (quizErrorUrl && quizErrorUrl !== currentCleanUrl) { quizError = null; quizErrorUrl = null; }
   if (isDiscoveringPathQueue || isBulkActive || isSolvingQuiz || isQuizWorkflowRunning || quizAutoPaused || !autoSolveQuizzes || quizError) return;
-  if (!isQuizOnPage()) return;
+  if (getExternalPathItemState() || !isQuizOnPage()) return;
   const active = hasActiveQuizQuestion() || hasPendingQuizStart();
   if (!active && solvedQuizUrls.has(currentCleanUrl)) { continueAfterQuiz(window.location.pathname); return; }
   const now = Date.now();
@@ -2305,7 +2388,7 @@ function checkAndAutoSolveQuiz() {
     quizAutoTriggerTimer = null;
     const url = window.location.href.split('?')[0].split('#')[0];
     if (epoch !== quizRunEpoch || url !== currentCleanUrl || isBulkActive || isSolvingQuiz ||
-        isQuizWorkflowRunning || quizAutoPaused || quizError || !autoSolveQuizzes || !isQuizOnPage()) return;
+        isQuizWorkflowRunning || quizAutoPaused || quizError || !autoSolveQuizzes || getExternalPathItemState() || !isQuizOnPage()) return;
     solveLinkedInQuizWithGreenTickRetry().then(ok => {
       if (ok) solvedQuizUrls.add(currentCleanUrl);
     });
@@ -2346,7 +2429,8 @@ function findEarlierUnfinishedLesson(syllabus, path, mode = 'pending_only') {
 
 async function runAutonomousStep() {
   if (!isExtensionContextActive()) return;
-  if (isDiscoveringPathQueue || !isBulkActive || (!backgroundRun && document.hidden)) return;
+  if (isDiscoveringPathQueue || !isBulkActive || (!backgroundRun && document.hidden) ||
+      document.querySelector('video')?.getAttribute?.('data-li-user-paused') === 'true') return;
   if (isRunningAutonomousStep || isNavigatingToLesson) {
     return;
   }
@@ -2360,6 +2444,7 @@ async function runAutonomousStep() {
   try {
     startAudioKeepalive();
     rememberLearningPath();
+    if (handleExternalPathItem()) return;
     if (isStandalonePathVideo()) {
       await runStandalonePathVideo();
       return;
@@ -2762,10 +2847,12 @@ function navigateToLesson(lesson, {allowAutoplay = false} = {}) {
 // ─── Playback Engine & Anti-Freeze ────────────────────────────────────────────
 
 window.addEventListener('message', event => {
-  if (event.source !== window || event.data?.type !== 'LI_BACKGROUND_PLAY_BLOCKED' || !backgroundRun) return;
-  const message = 'Background playback was blocked by the browser. Open the tab and press Play once.';
-  showHUD(message, 'warn');
-  sendProgress({ message });
+  if (event.source !== window || event.origin !== window.location.origin ||
+      event.data?.type !== 'LI_BACKGROUND_PLAY_BLOCKED' || !backgroundRun ||
+      event.data.path !== window.location.pathname) return;
+  // Use the shared cooldown and muted autoplay fallback instead of stopping here.
+  const video = document.querySelector('video');
+  if (video) requestManagedPlayback(video);
 });
 
 function syncPlaybackSettings() {
@@ -2916,11 +3003,13 @@ function runPlaybackWatchdog() {
     if (!isExtensionContextActive()) return;
     recoverPendingLessonNavigation();
     syncBackgroundSupervision();
+    if (handleExternalPathItem()) return;
     if (recoverBlockedPlayback()) return;
     const currentVideo = document.querySelector('video');
     if (videoEl && videoEl !== currentVideo) videoEl = null;
     if (currentVideo && currentVideo !== videoEl) attachToVideo(currentVideo);
     if (isDiscoveringPathQueue) return;
+    if (videoEl?.getAttribute?.('data-li-user-paused') === 'true') return;
     // Bulk mode also needs speed enforcement after a player or page-world reset.
     if (isBulkActive && videoEl && !isQuizOnPage() && speedInjectionEnabled &&
         Date.now() - lastRateChangeTime > 500 && videoEl.playbackRate !== currentSpeed) applySpeed(videoEl, currentSpeed);
@@ -2966,7 +3055,7 @@ function runPlaybackWatchdog() {
             nonVideoTimer = setTimeout(() => {
               nonVideoTimer = null;
               if (skipEpoch === quizRunEpoch && skipPath === window.location.pathname && !quizAutoPaused &&
-                  skipNonVideos && autoplayEnabled && autoNavigateEnabled && !isQuizOnPage() &&
+                  skipNonVideos && autoplayEnabled && autoNavigateEnabled && !isQuizOnPage() && !getExternalPathItemState() &&
                   !document.querySelector('video') && !getCourseSyllabus().some(item => item.href === skipPath && item.isVideo)) {
                 goToNextLesson();
               }
@@ -3007,7 +3096,7 @@ function runPlaybackWatchdog() {
       lastRecordedTime = now;
     }
 
-    if (videoEl.paused && !videoEl.ended && isBulkActive && (backgroundRun || !document.hidden)) {
+    if (videoEl.paused && !videoEl.ended && autoplayEnabled && !quizAutoPaused && (backgroundRun || !document.hidden)) {
       if (videoEl.readyState >= 2) {
         requestManagedPlayback(videoEl);
       }
@@ -3255,6 +3344,7 @@ async function startAllPaths({resumeDiscovery = false} = {}) {
   }
   if (isDiscoveringPathQueue && !resumeDiscovery) return {success:true, discovering:true, message:'Path discovery is already running.'};
   const epoch = ++quizRunEpoch;
+  document.querySelector('video')?.removeAttribute?.('data-li-user-paused');
   isDiscoveringPathQueue = true;
   isBulkActive = false;
   quizAutoPaused = false;
@@ -3389,6 +3479,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.focusMode) focusMode = message.focusMode;
     if (message.speed) currentSpeed = Math.min(16, Math.max(0.25, parseFloat(message.speed) || currentSpeed));
     isBulkActive = true;
+    document.querySelector('video')?.removeAttribute?.('data-li-user-paused');
     quizError = null; quizErrorUrl = null; quizAutoPaused = false;
     continuedQuizUrls.clear();
     rememberLearningPath();
